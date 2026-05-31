@@ -11,7 +11,41 @@ public enum SearchablePDFRenderer {
 
     public static func render(results: [OCRResult]) throws -> Data {
         let mutableData = NSMutableData()
-        var initialMediaBox = results.first.flatMap { firstResult -> CGRect? in
+        guard let consumer = CGDataConsumer(data: mutableData as CFMutableData),
+              let context = makePDFContext(
+                results: results,
+                consumer: consumer
+              ) else {
+            throw AppleVisionError.writeFailed("Unable to create searchable PDF data.")
+        }
+
+        try render(results: results, in: context)
+        return mutableData as Data
+    }
+
+    public static func render(results: [OCRResult], to destinationURL: URL) throws {
+        if (try? destinationURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+            throw AppleVisionError.writeFailed(destinationURL.path)
+        }
+
+        guard let consumer = CGDataConsumer(url: destinationURL as CFURL),
+              let context = makePDFContext(
+                results: results,
+                consumer: consumer
+              ) else {
+            throw AppleVisionError.writeFailed(destinationURL.path)
+        }
+
+        try render(results: results, in: context)
+    }
+
+    private static func makePDFContext(results: [OCRResult], consumer: CGDataConsumer) -> CGContext? {
+        var initialMediaBox = initialMediaBox(for: results)
+        return CGContext(consumer: consumer, mediaBox: &initialMediaBox, nil)
+    }
+
+    private static func initialMediaBox(for results: [OCRResult]) -> CGRect {
+        results.first.flatMap { firstResult -> CGRect? in
             var documentCache: [String: PDFDocument] = [:]
             var pdfCanvasBoundsCache: [String: CGRect] = [:]
             return try? loadSourcePage(
@@ -20,13 +54,9 @@ public enum SearchablePDFRenderer {
                 pdfCanvasBoundsCache: &pdfCanvasBoundsCache
             ).bounds
         } ?? CGRect(x: 0, y: 0, width: 612, height: 792)
+    }
 
-        guard let consumer = CGDataConsumer(data: mutableData as CFMutableData),
-              let context = CGContext(consumer: consumer, mediaBox: &initialMediaBox, nil)
-        else {
-            throw AppleVisionError.writeFailed("Unable to create searchable PDF data.")
-        }
-
+    private static func render(results: [OCRResult], in context: CGContext) throws {
         var documentCache: [String: PDFDocument] = [:]
         var pdfCanvasBoundsCache: [String: CGRect] = [:]
 
@@ -40,7 +70,6 @@ public enum SearchablePDFRenderer {
         }
 
         context.closePDF()
-        return mutableData as Data
     }
 
     private static func loadSourcePage(

@@ -95,7 +95,11 @@ struct CLIConfiguration {
             recognitionLevel: recognitionLevel,
             recognitionLanguages: recognitionLanguages,
             usesLanguageCorrection: usesLanguageCorrection,
-            pdfTextMode: pdfTextMode
+            pdfTextMode: pdfTextMode,
+            detailLevel: OCRDetailLevel.recommended(
+                outputFormat: outputFormat,
+                writesVerificationReport: verificationReportPath != nil
+            )
         )
     }
 

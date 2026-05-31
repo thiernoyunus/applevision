@@ -69,25 +69,73 @@ public enum PDFTextMode: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+public enum OCRDetailLevel: String, CaseIterable, Sendable {
+    case textOnly
+    case review
+
+    public static func recommended(
+        exportChoice: DocumentExportChoice,
+        reviewBeforeExport: Bool
+    ) -> OCRDetailLevel {
+        if reviewBeforeExport || exportChoice.includesSearchablePDF {
+            return .review
+        }
+
+        return .textOnly
+    }
+
+    public static func recommended(
+        outputFormat: OCRTextFormat,
+        writesVerificationReport: Bool
+    ) -> OCRDetailLevel {
+        if writesVerificationReport || outputFormat == .json {
+            return .review
+        }
+
+        return .textOnly
+    }
+
+    public var includesAlternativeCandidates: Bool {
+        switch self {
+        case .textOnly:
+            return false
+        case .review:
+            return true
+        }
+    }
+
+    public var includesWordGeometry: Bool {
+        switch self {
+        case .textOnly:
+            return false
+        case .review:
+            return true
+        }
+    }
+}
+
 public struct OCRRequestOptions: Sendable {
     public let recursive: Bool
     public let recognitionLevel: VNRequestTextRecognitionLevel
     public let recognitionLanguages: [String]
     public let usesLanguageCorrection: Bool
     public let pdfTextMode: PDFTextMode
+    public let detailLevel: OCRDetailLevel
 
     public init(
         recursive: Bool = false,
         recognitionLevel: VNRequestTextRecognitionLevel = .accurate,
         recognitionLanguages: [String] = [],
         usesLanguageCorrection: Bool = true,
-        pdfTextMode: PDFTextMode = .preferEmbeddedText
+        pdfTextMode: PDFTextMode = .preferEmbeddedText,
+        detailLevel: OCRDetailLevel = .review
     ) {
         self.recursive = recursive
         self.recognitionLevel = recognitionLevel
         self.recognitionLanguages = recognitionLanguages
         self.usesLanguageCorrection = usesLanguageCorrection
         self.pdfTextMode = pdfTextMode
+        self.detailLevel = detailLevel
     }
 
     public static let arabicDefault = OCRRequestOptions(
@@ -95,7 +143,8 @@ public struct OCRRequestOptions: Sendable {
         recognitionLevel: .accurate,
         recognitionLanguages: ["ar", "en-US"],
         usesLanguageCorrection: true,
-        pdfTextMode: .preferEmbeddedText
+        pdfTextMode: .preferEmbeddedText,
+        detailLevel: .review
     )
 }
 

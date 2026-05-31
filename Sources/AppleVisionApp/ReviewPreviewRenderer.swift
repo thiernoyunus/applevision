@@ -7,7 +7,18 @@ import PDFKit
 
 enum ReviewPreviewRenderer {
     private static let ciContext = CIContext(options: nil)
-    private static let pageCache = NSCache<NSString, NSImage>()
+    private static let pageCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 32
+        cache.totalCostLimit = 512 * 1024 * 1024
+        return cache
+    }()
+    private static let sourceImageCache: NSCache<NSString, CachedCGImage> = {
+        let cache = NSCache<NSString, CachedCGImage>()
+        cache.countLimit = 16
+        cache.totalCostLimit = 256 * 1024 * 1024
+        return cache
+    }()
 
     static func image(for issue: OCRReviewIssue) -> NSImage? {
         guard let croppedImage = croppedCGImage(for: issue) else {
@@ -75,10 +86,22 @@ enum ReviewPreviewRenderer {
     }
 
     private static func sourceCGImage(sourceURL: URL, pageNumber: Int?) -> CGImage? {
-        if sourceURL.pathExtension.lowercased() == "pdf" {
-            return renderPDFPage(from: sourceURL, pageNumber: pageNumber)
+        let cacheKey = "\(sourceURL.path)#\(pageNumber ?? 0)" as NSString
+        if let cachedImage = sourceImageCache.object(forKey: cacheKey)?.image {
+            return cachedImage
         }
-        return loadOrientedImage(from: sourceURL)
+
+        let image: CGImage?
+        if sourceURL.pathExtension.lowercased() == "pdf" {
+            image = renderPDFPage(from: sourceURL, pageNumber: pageNumber)
+        } else {
+            image = loadOrientedImage(from: sourceURL)
+        }
+
+        if let image {
+            sourceImageCache.setObject(CachedCGImage(image), forKey: cacheKey, cost: image.memoryCost)
+        }
+        return image
     }
 
     private static func loadOrientedImage(from url: URL) -> CGImage? {
@@ -182,5 +205,19 @@ enum ReviewPreviewRenderer {
         }
 
         return cgImage.cropping(to: rect)
+    }
+}
+
+private final class CachedCGImage {
+    let image: CGImage
+
+    init(_ image: CGImage) {
+        self.image = image
+    }
+}
+
+private extension CGImage {
+    var memoryCost: Int {
+        bytesPerRow * height
     }
 }
