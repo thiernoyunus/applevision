@@ -160,8 +160,9 @@ public struct OCRService: Sendable {
         completedUnitCount: inout Int,
         progress: (@Sendable (OCRProgressUpdate) -> Void)?
     ) throws -> [OCRResult] {
+        let maxConcurrentOperationCount = min(4, max(1, ProcessInfo.processInfo.activeProcessorCount - 1))
         let queue = OperationQueue()
-        queue.maxConcurrentOperationCount = min(4, max(1, ProcessInfo.processInfo.activeProcessorCount - 1))
+        queue.maxConcurrentOperationCount = maxConcurrentOperationCount
         queue.qualityOfService = .userInitiated
 
         let state = ConcurrentPDFOCRState(
@@ -169,24 +170,41 @@ public struct OCRService: Sendable {
             completedUnitCount: completedUnitCount
         )
 
-        for pageIndex in 0 ..< pageCount {
+        for pageChunk in Self.concurrentPDFPageChunks(
+            pageCount: pageCount,
+            maxConcurrentOperationCount: maxConcurrentOperationCount
+        ) {
             queue.addOperation {
+                guard let document = PDFDocument(url: url) else {
+                    state.record(error: AppleVisionError.unableToLoadPDF(url.path))
+                    return
+                }
+
                 guard !state.hasFailed else {
                     return
                 }
 
-                do {
-                    let result = try self.processOCROnlyPDFPage(at: url, pageIndex: pageIndex)
-                    let progressUpdate = state.record(
-                        result: result,
-                        pageIndex: pageIndex,
-                        totalUnitCount: totalUnitCount,
-                        sourcePath: url.path,
-                        pageNumber: pageIndex + 1
-                    )
-                    progress?(progressUpdate)
-                } catch {
-                    state.record(error: error)
+                for pageIndex in pageChunk {
+                    guard !state.hasFailed else {
+                        return
+                    }
+
+                    do {
+                        let result = try self.processOCROnlyPDFPage(
+                            in: document,
+                            sourcePath: url.path,
+                            pageIndex: pageIndex
+                        )
+                        let progressUpdate = state.record(
+                            result: result,
+                            pageIndex: pageIndex,
+                            totalUnitCount: totalUnitCount,
+                            sourcePath: url.path
+                        )
+                        progress?(progressUpdate)
+                    } catch {
+                        state.record(error: error)
+                    }
                 }
             }
         }
@@ -196,16 +214,37 @@ public struct OCRService: Sendable {
         return try state.orderedResults(sourcePath: url.path)
     }
 
-    private func processOCROnlyPDFPage(at url: URL, pageIndex: Int) throws -> OCRResult {
-        guard let document = PDFDocument(url: url),
-              let page = document.page(at: pageIndex),
+    static func concurrentPDFPageChunks(pageCount: Int, maxConcurrentOperationCount: Int) -> [[Int]] {
+        guard pageCount > 0 else {
+            return []
+        }
+
+        let workerCount = min(pageCount, max(1, maxConcurrentOperationCount))
+        let baseChunkSize = pageCount / workerCount
+        let largerChunkCount = pageCount % workerCount
+        var nextPageIndex = 0
+
+        return (0 ..< workerCount).map { workerIndex in
+            let chunkSize = baseChunkSize + (workerIndex < largerChunkCount ? 1 : 0)
+            let chunk = Array(nextPageIndex ..< nextPageIndex + chunkSize)
+            nextPageIndex += chunkSize
+            return chunk
+        }
+    }
+
+    private func processOCROnlyPDFPage(
+        in document: PDFDocument,
+        sourcePath: String,
+        pageIndex: Int
+    ) throws -> OCRResult {
+        guard let page = document.page(at: pageIndex),
               let renderedPage = Self.renderPDFPage(page)
         else {
-            throw AppleVisionError.unableToRenderPDFPage(url.path, pageIndex + 1)
+            throw AppleVisionError.unableToRenderPDFPage(sourcePath, pageIndex + 1)
         }
 
         return OCRResult(
-            sourcePath: url.path,
+            sourcePath: sourcePath,
             pageNumber: pageIndex + 1,
             lines: try recognizeText(in: renderedPage, orientation: .up)
         )
@@ -401,7 +440,7 @@ public struct OCRService: Sendable {
     }
 }
 
-private final class ConcurrentPDFOCRState: @unchecked Sendable {
+final class ConcurrentPDFOCRState: @unchecked Sendable {
     private let lock = NSLock()
     private var pageResults: [OCRResult?]
     private var firstError: Error?
@@ -428,8 +467,7 @@ private final class ConcurrentPDFOCRState: @unchecked Sendable {
         result: OCRResult,
         pageIndex: Int,
         totalUnitCount: Int,
-        sourcePath: String,
-        pageNumber: Int
+        sourcePath: String
     ) -> OCRProgressUpdate {
         lock.lock()
         defer { lock.unlock() }
@@ -440,7 +478,7 @@ private final class ConcurrentPDFOCRState: @unchecked Sendable {
             completedUnitCount: storedCompletedUnitCount,
             totalUnitCount: totalUnitCount,
             sourcePath: sourcePath,
-            pageNumber: pageNumber
+            pageNumber: nil
         )
     }
 

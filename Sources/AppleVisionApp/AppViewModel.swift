@@ -820,6 +820,7 @@ final class AppViewModel: ObservableObject {
             line.lineIndex = index + 1
             return line
         }
+        state.rebuildLineLocationLookup()
         state.selectedLineIndexByPageID[state.pages[pageIndex].id] = normalizedSelectedLineIndex(
             for: state.pages[pageIndex],
             requestedIndex: state.selectedLineIndexByPageID[state.pages[pageIndex].id]
@@ -992,12 +993,10 @@ final class AppViewModel: ObservableObject {
         withID lineID: String,
         in state: FullDocumentReviewState
     ) -> (pageIndex: Int, lineIndex: Int)? {
-        for pageIndex in state.pages.indices {
-            if let lineIndex = state.pages[pageIndex].lines.firstIndex(where: { $0.id == lineID }) {
-                return (pageIndex, lineIndex)
-            }
+        guard let location = state.location(forReviewedLineID: lineID) else {
+            return nil
         }
-        return nil
+        return (location.pageIndex, location.lineIndex)
     }
 
     private func requestAppleIntelligenceSuggestion(for issue: OCRReviewIssue) async {
@@ -1067,12 +1066,11 @@ final class AppViewModel: ObservableObject {
         }
 
         if exportChoice.includesSearchablePDF {
-            let pdfData = try SearchablePDFRenderer.render(results: results)
             artifacts.append(
                 PendingExportArtifact(
                     suffix: "searchable",
                     fileExtension: "pdf",
-                    content: .data(pdfData)
+                    content: .searchablePDF(results)
                 )
             )
         }
@@ -1091,8 +1089,8 @@ final class AppViewModel: ObservableObject {
                 switch artifact.content {
                 case let .text(text):
                     try text.write(to: fileURL, atomically: true, encoding: .utf8)
-                case let .data(data):
-                    try data.write(to: fileURL, options: .atomic)
+                case let .searchablePDF(results):
+                    try SearchablePDFRenderer.render(results: results, to: fileURL)
                 }
                 return fileURL
             } catch {
@@ -1311,10 +1309,27 @@ struct ReviewedPage: Identifiable, Sendable {
     }
 }
 
+struct ReviewedLineLocation: Equatable, Sendable {
+    let pageIndex: Int
+    let lineIndex: Int
+}
+
 struct FullDocumentReviewState: Sendable {
     var pages: [ReviewedPage]
     var selectedPageIndex: Int
     var selectedLineIndexByPageID: [String: Int]
+    private var lineLocationByID: [String: ReviewedLineLocation]
+
+    init(
+        pages: [ReviewedPage],
+        selectedPageIndex: Int,
+        selectedLineIndexByPageID: [String: Int]
+    ) {
+        self.pages = pages
+        self.selectedPageIndex = selectedPageIndex
+        self.selectedLineIndexByPageID = selectedLineIndexByPageID
+        lineLocationByID = Self.makeLineLocationLookup(for: pages)
+    }
 
     var selectedPage: ReviewedPage? {
         guard pages.indices.contains(selectedPageIndex) else {
@@ -1329,6 +1344,28 @@ struct FullDocumentReviewState: Sendable {
 
     static func lineID(sourcePath: String, pageNumber: Int?, lineIndex: Int) -> String {
         "\(sourcePath)#\(pageNumber ?? 0)#\(lineIndex)"
+    }
+
+    func location(forReviewedLineID lineID: String) -> ReviewedLineLocation? {
+        lineLocationByID[lineID]
+    }
+
+    mutating func rebuildLineLocationLookup() {
+        lineLocationByID = Self.makeLineLocationLookup(for: pages)
+    }
+
+    private static func makeLineLocationLookup(for pages: [ReviewedPage]) -> [String: ReviewedLineLocation] {
+        var lookup: [String: ReviewedLineLocation] = [:]
+        lookup.reserveCapacity(pages.reduce(0) { $0 + $1.lines.count })
+        for pageIndex in pages.indices {
+            for lineIndex in pages[pageIndex].lines.indices {
+                lookup[pages[pageIndex].lines[lineIndex].id] = ReviewedLineLocation(
+                    pageIndex: pageIndex,
+                    lineIndex: lineIndex
+                )
+            }
+        }
+        return lookup
     }
 }
 
@@ -1365,5 +1402,5 @@ private struct PendingTranslationExport: Sendable {
 
 private enum ExportArtifactContent: Sendable {
     case text(String)
-    case data(Data)
+    case searchablePDF([OCRResult])
 }

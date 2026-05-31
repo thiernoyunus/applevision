@@ -84,6 +84,17 @@ public enum OCRDetailLevel: String, CaseIterable, Sendable {
         return .textOnly
     }
 
+    public static func recommended(
+        outputFormat: OCRTextFormat,
+        writesVerificationReport: Bool
+    ) -> OCRDetailLevel {
+        if writesVerificationReport || outputFormat == .json {
+            return .review
+        }
+
+        return .textOnly
+    }
+
     public var includesAlternativeCandidates: Bool {
         switch self {
         case .textOnly:

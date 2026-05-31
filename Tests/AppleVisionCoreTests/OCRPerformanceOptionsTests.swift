@@ -50,6 +50,33 @@ final class OCRPerformanceOptionsTests: XCTestCase {
         XCTAssertEqual(detailLevel, .review)
     }
 
+    func testRecommendedCLIDetailLevelUsesTextOnlyForPlainTextWithoutReport() {
+        let detailLevel = OCRDetailLevel.recommended(
+            outputFormat: .plain,
+            writesVerificationReport: false
+        )
+
+        XCTAssertEqual(detailLevel, .textOnly)
+    }
+
+    func testRecommendedCLIDetailLevelKeepsReviewDetailsForJSON() {
+        let detailLevel = OCRDetailLevel.recommended(
+            outputFormat: .json,
+            writesVerificationReport: false
+        )
+
+        XCTAssertEqual(detailLevel, .review)
+    }
+
+    func testRecommendedCLIDetailLevelKeepsReviewDetailsForVerificationReport() {
+        let detailLevel = OCRDetailLevel.recommended(
+            outputFormat: .plain,
+            writesVerificationReport: true
+        )
+
+        XCTAssertEqual(detailLevel, .review)
+    }
+
     func testPDFRenderConfigurationCapsLargePages() {
         let configuration = PDFRenderConfiguration(scale: 2.0, maximumPixelCount: 2_000_000)
         let size = CGSize(width: 1_000, height: 2_000)
@@ -62,5 +89,32 @@ final class OCRPerformanceOptionsTests: XCTestCase {
         let size = CGSize(width: 500, height: 700)
 
         XCTAssertEqual(configuration.pixelSize(for: size), CGSize(width: 1_000, height: 1_400))
+    }
+
+    func testConcurrentPDFPageChunksLimitDocumentReopens() {
+        let chunks = OCRService.concurrentPDFPageChunks(pageCount: 10, maxConcurrentOperationCount: 4)
+
+        XCTAssertEqual(chunks, [
+            [0, 1, 2],
+            [3, 4, 5],
+            [6, 7],
+            [8, 9],
+        ])
+    }
+
+    func testConcurrentPDFProgressOmitsOutOfOrderPageNumber() {
+        let state = ConcurrentPDFOCRState(pageCount: 2, completedUnitCount: 0)
+        let result = OCRResult(sourcePath: "/tmp/example.pdf", pageNumber: 2, lines: [])
+
+        let update = state.record(
+            result: result,
+            pageIndex: 1,
+            totalUnitCount: 2,
+            sourcePath: "/tmp/example.pdf"
+        )
+
+        XCTAssertEqual(update.completedUnitCount, 1)
+        XCTAssertEqual(update.totalUnitCount, 2)
+        XCTAssertNil(update.pageNumber)
     }
 }

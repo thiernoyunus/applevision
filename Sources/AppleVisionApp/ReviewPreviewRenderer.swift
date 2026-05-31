@@ -7,7 +7,12 @@ import PDFKit
 
 enum ReviewPreviewRenderer {
     private static let ciContext = CIContext(options: nil)
-    private static let pageCache = NSCache<NSString, NSImage>()
+    private static let pageCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 32
+        cache.totalCostLimit = 512 * 1024 * 1024
+        return cache
+    }()
     private static let sourceImageCache: NSCache<NSString, CachedCGImage> = {
         let cache = NSCache<NSString, CachedCGImage>()
         cache.countLimit = 16
