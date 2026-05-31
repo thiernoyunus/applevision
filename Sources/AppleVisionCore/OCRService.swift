@@ -4,7 +4,7 @@ import ImageIO
 import PDFKit
 import Vision
 
-public struct OCRService {
+public struct OCRService: Sendable {
     private let options: OCRRequestOptions
 
     public init(options: OCRRequestOptions) {
@@ -88,6 +88,16 @@ public struct OCRService {
             throw AppleVisionError.unableToLoadPDF(url.path)
         }
 
+        if options.pdfTextMode == .ocrOnly, document.pageCount > 1 {
+            return try processOCROnlyPDFConcurrently(
+                at: url,
+                pageCount: document.pageCount,
+                totalUnitCount: totalUnitCount,
+                completedUnitCount: &completedUnitCount,
+                progress: progress
+            )
+        }
+
         var pageResults: [OCRResult] = []
 
         for pageIndex in 0 ..< document.pageCount {
@@ -143,6 +153,64 @@ public struct OCRService {
         return pageResults
     }
 
+    private func processOCROnlyPDFConcurrently(
+        at url: URL,
+        pageCount: Int,
+        totalUnitCount: Int,
+        completedUnitCount: inout Int,
+        progress: (@Sendable (OCRProgressUpdate) -> Void)?
+    ) throws -> [OCRResult] {
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = min(4, max(1, ProcessInfo.processInfo.activeProcessorCount - 1))
+        queue.qualityOfService = .userInitiated
+
+        let state = ConcurrentPDFOCRState(
+            pageCount: pageCount,
+            completedUnitCount: completedUnitCount
+        )
+
+        for pageIndex in 0 ..< pageCount {
+            queue.addOperation {
+                guard !state.hasFailed else {
+                    return
+                }
+
+                do {
+                    let result = try self.processOCROnlyPDFPage(at: url, pageIndex: pageIndex)
+                    let progressUpdate = state.record(
+                        result: result,
+                        pageIndex: pageIndex,
+                        totalUnitCount: totalUnitCount,
+                        sourcePath: url.path,
+                        pageNumber: pageIndex + 1
+                    )
+                    progress?(progressUpdate)
+                } catch {
+                    state.record(error: error)
+                }
+            }
+        }
+
+        queue.waitUntilAllOperationsAreFinished()
+        completedUnitCount = state.completedUnitCount
+        return try state.orderedResults(sourcePath: url.path)
+    }
+
+    private func processOCROnlyPDFPage(at url: URL, pageIndex: Int) throws -> OCRResult {
+        guard let document = PDFDocument(url: url),
+              let page = document.page(at: pageIndex),
+              let renderedPage = Self.renderPDFPage(page)
+        else {
+            throw AppleVisionError.unableToRenderPDFPage(url.path, pageIndex + 1)
+        }
+
+        return OCRResult(
+            sourcePath: url.path,
+            pageNumber: pageIndex + 1,
+            lines: try recognizeText(in: renderedPage, orientation: .up)
+        )
+    }
+
     private func recognizeText(in image: CGImage, orientation: CGImagePropertyOrientation) throws -> [OCRLine] {
         let request = VNRecognizeTextRequest(completionHandler: nil)
         request.recognitionLevel = options.recognitionLevel
@@ -163,7 +231,8 @@ public struct OCRService {
         for observation in observations {
             var recognizedCandidates: [VNRecognizedText] = []
 
-            for candidate in observation.topCandidates(3) {
+            let candidateLimit = options.detailLevel.includesAlternativeCandidates ? 3 : 1
+            for candidate in observation.topCandidates(candidateLimit) {
                 let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else {
                     continue
@@ -182,12 +251,14 @@ public struct OCRService {
                 continue
             }
 
-            let candidates = recognizedCandidates.map { candidate in
-                OCRCandidate(
-                    text: candidate.string.trimmingCharacters(in: .whitespacesAndNewlines),
-                    confidence: candidate.confidence
-                )
-            }
+            let candidates = options.detailLevel.includesAlternativeCandidates
+                ? recognizedCandidates.map { candidate in
+                    OCRCandidate(
+                        text: candidate.string.trimmingCharacters(in: .whitespacesAndNewlines),
+                        confidence: candidate.confidence
+                    )
+                }
+                : []
 
             lines.append(RecognizedLine(
                 line: OCRLine(
@@ -195,7 +266,7 @@ public struct OCRService {
                     confidence: primaryCandidate.confidence,
                     boundingBox: OCRBoundingBox(rect: observation.boundingBox),
                     candidates: candidates,
-                    words: extractWords(from: primaryCandidate)
+                    words: options.detailLevel.includesWordGeometry ? extractWords(from: primaryCandidate) : []
                 ),
                 boundingBox: observation.boundingBox
             ))
@@ -261,15 +332,19 @@ public struct OCRService {
         return .up
     }
 
-    public static func renderPDFPage(_ page: PDFPage) -> CGImage? {
+    public static func renderPDFPage(
+        _ page: PDFPage,
+        configuration: PDFRenderConfiguration = .default
+    ) -> CGImage? {
         let bounds = normalizedPDFPageBounds(for: page)
         guard bounds.width > 0, bounds.height > 0 else {
             return nil
         }
 
-        let scale: CGFloat = 2.0
-        let width = Int(bounds.width * scale)
-        let height = Int(bounds.height * scale)
+        let pixelSize = configuration.pixelSize(for: bounds.size)
+        let scale = pixelSize.width / bounds.width
+        let width = Int(pixelSize.width)
+        let height = Int(pixelSize.height)
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
 
@@ -323,6 +398,107 @@ public struct OCRService {
         }
 
         return max(total, 1)
+    }
+}
+
+private final class ConcurrentPDFOCRState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pageResults: [OCRResult?]
+    private var firstError: Error?
+    private var storedCompletedUnitCount: Int
+
+    init(pageCount: Int, completedUnitCount: Int) {
+        self.pageResults = Array<OCRResult?>(repeating: nil, count: pageCount)
+        self.storedCompletedUnitCount = completedUnitCount
+    }
+
+    var hasFailed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return firstError != nil
+    }
+
+    var completedUnitCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCompletedUnitCount
+    }
+
+    func record(
+        result: OCRResult,
+        pageIndex: Int,
+        totalUnitCount: Int,
+        sourcePath: String,
+        pageNumber: Int
+    ) -> OCRProgressUpdate {
+        lock.lock()
+        defer { lock.unlock() }
+
+        pageResults[pageIndex] = result
+        storedCompletedUnitCount += 1
+        return OCRProgressUpdate(
+            completedUnitCount: storedCompletedUnitCount,
+            totalUnitCount: totalUnitCount,
+            sourcePath: sourcePath,
+            pageNumber: pageNumber
+        )
+    }
+
+    func record(error: Error) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if firstError == nil {
+            firstError = error
+        }
+    }
+
+    func orderedResults(sourcePath: String) throws -> [OCRResult] {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let firstError {
+            throw firstError
+        }
+
+        return try pageResults.enumerated().map { pageIndex, result in
+            guard let result else {
+                throw AppleVisionError.unableToRenderPDFPage(sourcePath, pageIndex + 1)
+            }
+            return result
+        }
+    }
+}
+
+public struct PDFRenderConfiguration: Equatable, Sendable {
+    public static let `default` = PDFRenderConfiguration()
+
+    public let scale: CGFloat
+    public let maximumPixelCount: CGFloat
+
+    public init(scale: CGFloat = 2.0, maximumPixelCount: CGFloat = 8_000_000) {
+        self.scale = max(scale, 0.1)
+        self.maximumPixelCount = max(maximumPixelCount, 1)
+    }
+
+    public func pixelSize(for pointSize: CGSize) -> CGSize {
+        guard pointSize.width > 0, pointSize.height > 0 else {
+            return .zero
+        }
+
+        let requestedWidth = pointSize.width * scale
+        let requestedHeight = pointSize.height * scale
+        let requestedPixelCount = requestedWidth * requestedHeight
+
+        guard requestedPixelCount > maximumPixelCount else {
+            return CGSize(width: requestedWidth.rounded(.up), height: requestedHeight.rounded(.up))
+        }
+
+        let cappedScale = sqrt(maximumPixelCount / requestedPixelCount)
+        return CGSize(
+            width: max(1, (requestedWidth * cappedScale).rounded(.down)),
+            height: max(1, (requestedHeight * cappedScale).rounded(.down))
+        )
     }
 }
 

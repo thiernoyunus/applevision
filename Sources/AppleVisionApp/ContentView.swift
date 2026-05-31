@@ -619,7 +619,7 @@ struct ContentView: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 12) {
+            LazyVStack(alignment: .leading, spacing: 12) {
                 ForEach(report.issues) { issue in
                     checkpointIssueRow(issue)
                 }

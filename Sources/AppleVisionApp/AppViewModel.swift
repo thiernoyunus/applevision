@@ -273,7 +273,11 @@ final class AppViewModel: ObservableObject {
                     recognitionLevel: .accurate,
                     recognitionLanguages: ["ar", "en-US"],
                     usesLanguageCorrection: true,
-                    pdfTextMode: pdfTextMode
+                    pdfTextMode: pdfTextMode,
+                    detailLevel: OCRDetailLevel.recommended(
+                        exportChoice: exportChoice,
+                        reviewBeforeExport: reviewBeforeExport
+                    )
                 )
                 let results = try OCRService(options: requestOptions).process(urls: resolvedURLs) { update in
                     Task { @MainActor in
