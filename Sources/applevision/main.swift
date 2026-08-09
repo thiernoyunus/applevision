@@ -135,10 +135,10 @@ struct HelpRequested: Error {}
 
 @main
 struct AppleVisionCLI {
-    static func main() {
+    static func main() async {
         do {
             let configuration = try CLIConfiguration(arguments: CommandLine.arguments)
-            try run(with: configuration)
+            try await run(with: configuration)
         } catch is HelpRequested {
             write(CLIConfiguration.usage, to: .standardOutput)
             exit(EXIT_SUCCESS)
@@ -151,9 +151,9 @@ struct AppleVisionCLI {
         }
     }
 
-    private static func run(with configuration: CLIConfiguration) throws {
+    private static func run(with configuration: CLIConfiguration) async throws {
         let inputURLs = try InputResolver(recursive: configuration.options.recursive).resolve(paths: configuration.inputPaths)
-        let results = try OCRService(options: configuration.options).process(urls: inputURLs)
+        let results = try await OCRService(options: configuration.options).processStructured(urls: inputURLs)
         let output = try OutputRenderer.render(results: results, format: configuration.outputFormat)
 
         if let outputPath = configuration.outputPath {

@@ -7,7 +7,13 @@ import PDFKit
 
 enum ReviewPreviewRenderer {
     private static let ciContext = CIContext(options: nil)
-    private static let pageCache = NSCache<NSString, NSImage>()
+    private static let sourceImageCache: NSCache<NSString, CachedSourceImage> = {
+        let cache = NSCache<NSString, CachedSourceImage>()
+        cache.countLimit = 12
+        cache.totalCostLimit = 96 * 1024 * 1024
+        return cache
+    }()
+    private static let sourceImageLock = NSLock()
 
     static func image(for issue: OCRReviewIssue) -> NSImage? {
         guard let croppedImage = croppedCGImage(for: issue) else {
@@ -32,11 +38,6 @@ enum ReviewPreviewRenderer {
     }
 
     static func pageImage(sourcePath: String, pageNumber: Int?) -> NSImage? {
-        let cacheKey = "\(sourcePath)#\(pageNumber ?? 0)" as NSString
-        if let cachedImage = pageCache.object(forKey: cacheKey) {
-            return cachedImage
-        }
-
         guard let cgImage = sourceCGImage(
             sourceURL: URL(fileURLWithPath: sourcePath),
             pageNumber: pageNumber
@@ -44,9 +45,11 @@ enum ReviewPreviewRenderer {
             return nil
         }
 
-        let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-        pageCache.setObject(image, forKey: cacheKey)
-        return image
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
+
+    static func clearSourceImageCache() {
+        sourceImageCache.removeAllObjects()
     }
 
     static func croppedCGImage(for issue: OCRReviewIssue) -> CGImage? {
@@ -75,10 +78,32 @@ enum ReviewPreviewRenderer {
     }
 
     private static func sourceCGImage(sourceURL: URL, pageNumber: Int?) -> CGImage? {
-        if sourceURL.pathExtension.lowercased() == "pdf" {
-            return renderPDFPage(from: sourceURL, pageNumber: pageNumber)
+        let cacheKey = "\(sourceURL.path)#\(pageNumber ?? 0)" as NSString
+        sourceImageLock.lock()
+        defer { sourceImageLock.unlock() }
+
+        if let cachedImage = sourceImageCache.object(forKey: cacheKey) {
+            return cachedImage.cgImage
         }
-        return loadOrientedImage(from: sourceURL)
+
+        // ponytail: global preview decode lock; use per-source locks only if review decoding contention becomes measurable.
+        let cgImage: CGImage?
+        if sourceURL.pathExtension.lowercased() == "pdf" {
+            cgImage = renderPDFPage(from: sourceURL, pageNumber: pageNumber)
+        } else {
+            cgImage = loadOrientedImage(from: sourceURL)
+        }
+
+        guard let cgImage else {
+            return nil
+        }
+
+        sourceImageCache.setObject(
+            CachedSourceImage(cgImage),
+            forKey: cacheKey,
+            cost: cgImage.bytesPerRow * cgImage.height
+        )
+        return cgImage
     }
 
     private static func loadOrientedImage(from url: URL) -> CGImage? {
@@ -128,50 +153,13 @@ enum ReviewPreviewRenderer {
             return nil
         }
 
-        let bounds = OCRService.normalizedPDFPageBounds(for: page)
-        guard bounds.width > 0, bounds.height > 0 else {
-            return nil
-        }
-
-        let scale: CGFloat = 2.0
-        let width = Int(bounds.width * scale)
-        let height = Int(bounds.height * scale)
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
-
-        guard let context = CGContext(
-            data: nil,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: colorSpace,
-            bitmapInfo: bitmapInfo
-        ) else {
-            return nil
-        }
-
-        context.interpolationQuality = .high
-        context.setFillColor(gray: 1.0, alpha: 1.0)
-        context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
-        context.scaleBy(x: scale, y: scale)
-        context.translateBy(x: 0, y: bounds.height)
-        context.scaleBy(x: 1.0, y: -1.0)
-        context.translateBy(x: -bounds.minX, y: -bounds.minY)
-        page.draw(with: OCRService.preferredPDFDisplayBox(for: page), to: context)
-
-        return context.makeImage()
+        return OCRService.renderPDFPage(page)
     }
 
     private static func crop(cgImage: CGImage, to boundingBox: OCRBoundingBox) -> CGImage? {
         let imageWidth = CGFloat(cgImage.width)
         let imageHeight = CGFloat(cgImage.height)
-        let rect = CGRect(
-            x: boundingBox.minX * imageWidth,
-            y: (1 - boundingBox.minY - boundingBox.height) * imageHeight,
-            width: boundingBox.width * imageWidth,
-            height: boundingBox.height * imageHeight
-        )
+        let rect = boundingBox.rect(in: CGRect(x: 0, y: 0, width: imageWidth, height: imageHeight))
         .insetBy(dx: -24, dy: -16)
         .standardized
         .intersection(CGRect(x: 0, y: 0, width: imageWidth, height: imageHeight))
@@ -182,5 +170,13 @@ enum ReviewPreviewRenderer {
         }
 
         return cgImage.cropping(to: rect)
+    }
+}
+
+private final class CachedSourceImage {
+    let cgImage: CGImage
+
+    init(_ cgImage: CGImage) {
+        self.cgImage = cgImage
     }
 }

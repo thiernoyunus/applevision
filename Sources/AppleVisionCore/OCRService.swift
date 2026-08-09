@@ -56,6 +56,43 @@ public struct OCRService {
         return results
     }
 
+    public func processStructured(urls: [URL]) async throws -> [OCRResult] {
+        try await processStructured(urls: urls, progress: nil)
+    }
+
+    public func processStructured(
+        urls: [URL],
+        progress: (@Sendable (OCRProgressUpdate) -> Void)?
+    ) async throws -> [OCRResult] {
+        var results: [OCRResult] = []
+        let totalUnitCount = try totalUnitCount(for: urls)
+        var completedUnitCount = 0
+
+        results.reserveCapacity(max(totalUnitCount, urls.count))
+
+        for url in urls {
+            if url.pathExtension.lowercased() == "pdf" {
+                results.append(contentsOf: try await processStructuredPDF(
+                    at: url,
+                    totalUnitCount: totalUnitCount,
+                    completedUnitCount: &completedUnitCount,
+                    progress: progress
+                ))
+            } else {
+                results.append(try await processStructuredImage(at: url))
+                completedUnitCount += 1
+                progress?(OCRProgressUpdate(
+                    completedUnitCount: completedUnitCount,
+                    totalUnitCount: totalUnitCount,
+                    sourcePath: url.path,
+                    pageNumber: nil
+                ))
+            }
+        }
+
+        return results
+    }
+
     private func processImage(at url: URL) throws -> OCRResult {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
@@ -66,6 +103,25 @@ public struct OCRService {
         let orientation = Self.orientation(for: source)
         let lines = try recognizeText(in: cgImage, orientation: orientation)
         return OCRResult(sourcePath: url.path, pageNumber: nil, lines: lines)
+    }
+
+    private func processStructuredImage(at url: URL) async throws -> OCRResult {
+        let sourceImage = try autoreleasepool { () throws -> (image: CGImage, orientation: CGImagePropertyOrientation) in
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
+            else {
+                throw AppleVisionError.unableToLoadImage(url.path)
+            }
+
+            return (cgImage, Self.orientation(for: source))
+        }
+        let recognition = try await recognizeTextStructured(in: sourceImage.image, orientation: sourceImage.orientation)
+        return OCRResult(
+            sourcePath: url.path,
+            pageNumber: nil,
+            lines: recognition.lines,
+            structure: recognition.structure
+        )
     }
 
     private func processPDF(at url: URL) throws -> [OCRResult] {
@@ -91,53 +147,113 @@ public struct OCRService {
         var pageResults: [OCRResult] = []
 
         for pageIndex in 0 ..< document.pageCount {
-            guard let page = document.page(at: pageIndex) else {
-                throw AppleVisionError.unableToRenderPDFPage(url.path, pageIndex + 1)
-            }
+            try autoreleasepool {
+                guard let page = document.page(at: pageIndex) else {
+                    throw AppleVisionError.unableToRenderPDFPage(url.path, pageIndex + 1)
+                }
 
-            let result: OCRResult
+                let result: OCRResult
 
-            switch options.pdfTextMode {
-            case .preferEmbeddedText:
-                let extractedPDFText = page.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                switch options.pdfTextMode {
+                case .preferEmbeddedText:
+                    let extractedPDFText = page.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
-                if !extractedPDFText.isEmpty {
-                    result = OCRResult(
-                        sourcePath: url.path,
-                        pageNumber: pageIndex + 1,
-                        lines: Self.makeTextLines(from: extractedPDFText)
-                    )
-                } else if let renderedPage = Self.renderPDFPage(page) {
+                    if !extractedPDFText.isEmpty {
+                        result = OCRResult(
+                            sourcePath: url.path,
+                            pageNumber: pageIndex + 1,
+                            lines: Self.makeTextLines(from: extractedPDFText)
+                        )
+                    } else if let renderedPage = Self.renderPDFPage(page) {
+                        result = OCRResult(
+                            sourcePath: url.path,
+                            pageNumber: pageIndex + 1,
+                            lines: try recognizeText(in: renderedPage, orientation: .up)
+                        )
+                    } else {
+                        throw AppleVisionError.unableToRenderPDFPage(url.path, pageIndex + 1)
+                    }
+                case .ocrOnly:
+                    guard let renderedPage = Self.renderPDFPage(page) else {
+                        throw AppleVisionError.unableToRenderPDFPage(url.path, pageIndex + 1)
+                    }
                     result = OCRResult(
                         sourcePath: url.path,
                         pageNumber: pageIndex + 1,
                         lines: try recognizeText(in: renderedPage, orientation: .up)
                     )
-                } else {
+                }
+
+                pageResults.append(result)
+                completedUnitCount += 1
+
+                if let progress {
+                    progress(OCRProgressUpdate(
+                        completedUnitCount: completedUnitCount,
+                        totalUnitCount: totalUnitCount,
+                        sourcePath: url.path,
+                        pageNumber: pageIndex + 1
+                    ))
+                }
+            }
+        }
+
+        return pageResults
+    }
+
+    private func processStructuredPDF(
+        at url: URL,
+        totalUnitCount: Int,
+        completedUnitCount: inout Int,
+        progress: (@Sendable (OCRProgressUpdate) -> Void)?
+    ) async throws -> [OCRResult] {
+        guard let document = PDFDocument(url: url) else {
+            throw AppleVisionError.unableToLoadPDF(url.path)
+        }
+
+        var pageResults: [OCRResult] = []
+
+        for pageIndex in 0 ..< document.pageCount {
+            let work = try autoreleasepool { () throws -> StructuredPDFPageWork in
+                guard let page = document.page(at: pageIndex) else {
                     throw AppleVisionError.unableToRenderPDFPage(url.path, pageIndex + 1)
                 }
-            case .ocrOnly:
+
+                if options.pdfTextMode == .preferEmbeddedText {
+                    let extractedPDFText = page.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if !extractedPDFText.isEmpty {
+                        return .embeddedText(Self.makeTextLines(from: extractedPDFText))
+                    }
+                }
+
                 guard let renderedPage = Self.renderPDFPage(page) else {
                     throw AppleVisionError.unableToRenderPDFPage(url.path, pageIndex + 1)
                 }
+                return .renderedPage(renderedPage)
+            }
+
+            let result: OCRResult
+            switch work {
+            case let .embeddedText(lines):
+                result = OCRResult(sourcePath: url.path, pageNumber: pageIndex + 1, lines: lines)
+            case let .renderedPage(image):
+                let recognition = try await recognizeTextStructured(in: image, orientation: .up)
                 result = OCRResult(
                     sourcePath: url.path,
                     pageNumber: pageIndex + 1,
-                    lines: try recognizeText(in: renderedPage, orientation: .up)
+                    lines: recognition.lines,
+                    structure: recognition.structure
                 )
             }
 
             pageResults.append(result)
             completedUnitCount += 1
-
-            if let progress {
-                progress(OCRProgressUpdate(
-                    completedUnitCount: completedUnitCount,
-                    totalUnitCount: totalUnitCount,
-                    sourcePath: url.path,
-                    pageNumber: pageIndex + 1
-                ))
-            }
+            progress?(OCRProgressUpdate(
+                completedUnitCount: completedUnitCount,
+                totalUnitCount: totalUnitCount,
+                sourcePath: url.path,
+                pageNumber: pageIndex + 1
+            ))
         }
 
         return pageResults
@@ -204,6 +320,125 @@ public struct OCRService {
         return lines.sorted(by: RecognizedLine.isBefore).map { $0.line }
     }
 
+    private func recognizeTextStructured(
+        in image: CGImage,
+        orientation: CGImagePropertyOrientation
+    ) async throws -> StructuredRecognition {
+        guard options.recognitionLevel == .accurate else {
+            return StructuredRecognition(lines: try recognizeText(in: image, orientation: orientation), structure: nil)
+        }
+
+        if #available(macOS 26.0, *) {
+            do {
+                if let recognition = try await recognizeDocument(in: image, orientation: orientation) {
+                    return recognition
+                }
+            } catch {
+                // Keep the established text recognizer as the failure fallback.
+            }
+        }
+
+        return StructuredRecognition(lines: try recognizeText(in: image, orientation: orientation), structure: nil)
+    }
+
+    @available(macOS 26.0, *)
+    private func recognizeDocument(
+        in image: CGImage,
+        orientation: CGImagePropertyOrientation
+    ) async throws -> StructuredRecognition? {
+        var request = RecognizeDocumentsRequest()
+        var textOptions = request.textRecognitionOptions
+        let requestedLanguages = options.recognitionLanguages.map(Locale.Language.init(identifier:))
+        textOptions.recognitionLanguages = requestedLanguages.filter(request.supportedRecognitionLanguages.contains)
+        textOptions.useLanguageCorrection = options.usesLanguageCorrection
+        textOptions.maximumCandidateCount = 3
+        request.textRecognitionOptions = textOptions
+
+        guard let observation = try await request.perform(on: image, orientation: orientation)
+            .max(by: { $0.confidence < $1.confidence })
+        else {
+            return nil
+        }
+
+        var lineIndicesByUUID: [UUID: Int] = [:]
+        var lines: [OCRLine] = []
+        for lineObservation in observation.document.text.lines {
+            guard let line = makeDocumentLine(from: lineObservation) else {
+                continue
+            }
+            lineIndicesByUUID[lineObservation.uuid] = lines.count
+            lines.append(line)
+        }
+
+        guard !lines.isEmpty else {
+            return nil
+        }
+
+        let tables = observation.document.tables.compactMap {
+            makeTable(from: $0, lineIndicesByUUID: lineIndicesByUUID)
+        }
+        return StructuredRecognition(
+            lines: lines,
+            structure: tables.isEmpty ? nil : OCRDocumentStructure(tables: tables)
+        )
+    }
+
+    @available(macOS 26.0, *)
+    private func makeDocumentLine(from observation: RecognizedTextObservation) -> OCRLine? {
+        let candidates = documentCandidates(from: observation)
+        guard let primaryCandidate = candidates.first else {
+            return nil
+        }
+
+        return OCRLine(
+            text: primaryCandidate.text,
+            confidence: primaryCandidate.confidence,
+            boundingBox: OCRBoundingBox(rect: observation.boundingRegion.boundingBox.cgRect),
+            candidates: candidates.map { OCRCandidate(text: $0.text, confidence: $0.confidence) },
+            words: extractWords(from: primaryCandidate.recognizedText)
+        )
+    }
+
+    @available(macOS 26.0, *)
+    private func documentCandidates(from observation: RecognizedTextObservation) -> [DocumentCandidate] {
+        var candidates: [DocumentCandidate] = []
+        for candidate in observation.topCandidates(3) {
+            let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty,
+                  !candidates.contains(where: { $0.text == text })
+            else {
+                continue
+            }
+            candidates.append(DocumentCandidate(text: text, confidence: candidate.confidence, recognizedText: candidate))
+        }
+        return candidates
+    }
+
+    @available(macOS 26.0, *)
+    private func makeTable(
+        from table: DocumentObservation.Container.Table,
+        lineIndicesByUUID: [UUID: Int]
+    ) -> OCRTable? {
+        let uniqueCells = Set(table.rows.flatMap { $0 })
+        let cells = uniqueCells.map { cell in
+            OCRTableCell(
+                row: cell.rowRange.lowerBound,
+                column: cell.columnRange.lowerBound,
+                rowSpan: cell.rowRange.count,
+                columnSpan: cell.columnRange.count,
+                fallbackText: cell.content.text.transcript.trimmingCharacters(in: .whitespacesAndNewlines),
+                boundingBox: OCRBoundingBox(rect: cell.content.boundingRegion.boundingBox.cgRect),
+                lineIndices: Array(Set(cell.content.text.lines.compactMap { lineIndicesByUUID[$0.uuid] })).sorted()
+            )
+        }
+        .sorted { ($0.row, $0.column) < ($1.row, $1.column) }
+
+        guard !cells.isEmpty else {
+            return nil
+        }
+        return OCRTable(cells: cells, boundingBox: OCRBoundingBox(rect: table.boundingRegion.boundingBox.cgRect))
+    }
+
     private static func makeTextLines(from text: String) -> [OCRLine] {
         text
             .split(whereSeparator: \.isNewline)
@@ -236,6 +471,29 @@ public struct OCRService {
                 confidence: candidate.confidence,
                 boundingBox: OCRBoundingBox(rect: boundingBox.boundingBox)
             ))
+        }
+
+        return words
+    }
+
+    @available(macOS 26.0, *)
+    private func extractWords(from candidate: RecognizedText) -> [OCRWord] {
+        let text = candidate.string
+        let fullRange = text.startIndex ..< text.endIndex
+        var words: [OCRWord] = []
+
+        text.enumerateSubstrings(in: fullRange, options: [.byWords, .localized]) { substring, substringRange, _, _ in
+            guard let substring,
+                  let boundingBox = candidate.boundingBox(for: substringRange)
+            else {
+                return
+            }
+
+            let trimmed = substring.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                return
+            }
+            words.append(OCRWord(text: trimmed, confidence: candidate.confidence, boundingBox: OCRBoundingBox(rect: boundingBox.boundingBox.cgRect)))
         }
 
         return words
@@ -289,8 +547,6 @@ public struct OCRService {
         context.setFillColor(gray: 1.0, alpha: 1.0)
         context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
         context.scaleBy(x: scale, y: scale)
-        context.translateBy(x: 0, y: bounds.height)
-        context.scaleBy(x: 1.0, y: -1.0)
         context.translateBy(x: -bounds.minX, y: -bounds.minY)
         page.draw(with: preferredPDFDisplayBox(for: page), to: context)
 
@@ -305,7 +561,11 @@ public struct OCRService {
     }
 
     public static func normalizedPDFPageBounds(for page: PDFPage) -> CGRect {
-        page.bounds(for: preferredPDFDisplayBox(for: page)).standardized.integral
+        let displayBox = preferredPDFDisplayBox(for: page)
+        return page.bounds(for: displayBox)
+            .applying(page.transform(for: displayBox))
+            .standardized
+            .integral
     }
 
     private func totalUnitCount(for urls: [URL]) throws -> Int {
@@ -339,6 +599,23 @@ struct RecognizedLine {
 
         return lhs.boundingBox.minX < rhs.boundingBox.minX
     }
+}
+
+private struct StructuredRecognition {
+    let lines: [OCRLine]
+    let structure: OCRDocumentStructure?
+}
+
+private enum StructuredPDFPageWork {
+    case embeddedText([OCRLine])
+    case renderedPage(CGImage)
+}
+
+@available(macOS 26.0, *)
+private struct DocumentCandidate {
+    let text: String
+    let confidence: Float
+    let recognizedText: RecognizedText
 }
 
 private extension OCRBoundingBox {
