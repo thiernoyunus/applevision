@@ -17,7 +17,7 @@ struct AppleVisionDesktopApp: App {
         WindowGroup("AppleVision OCR") {
             ContentView()
         }
-        .defaultSize(width: 756, height: 560)
+        .defaultSize(width: 1240, height: 820)
         .windowResizability(.automatic)
     }
 }

@@ -152,7 +152,7 @@ public enum SearchablePDFRenderer {
         textReferenceRect: CGRect,
         in context: CGContext
     ) {
-        let lines = result.lines.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let lines = result.structuredLines.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         var drewStructuredText = false
 
         for line in lines {
@@ -187,7 +187,7 @@ public enum SearchablePDFRenderer {
             return
         }
 
-        let pageText = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pageText = result.structuredText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !pageText.isEmpty else {
             return
         }

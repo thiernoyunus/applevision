@@ -143,9 +143,6 @@ final class AppViewModel: ObservableObject {
         self.outputDirectory = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory())
         restoreTranslationPreferences()
-        if let storedKey = try? OpenAIKeychainStore().loadAPIKey() {
-            self.openAIAPIKey = storedKey
-        }
         Task {
             await refreshTranslationAvailability()
         }
@@ -170,18 +167,24 @@ final class AppViewModel: ObservableObject {
         }
 
         dispatchGroup.notify(queue: .main) {
-            self.resetReviewState()
-            self.droppedURLs = accumulator.urls.sorted(by: InputOrdering.isNaturalPageBefore)
-            if self.droppedURLs.isEmpty {
-                self.statusMessage = AppleVisionError.dropFailed.localizedDescription
-                self.statusDetail = "Try dropping files again."
-            } else {
-                self.statusMessage = "Waiting for Files"
-                self.statusDetail = "Ready to process \(self.droppedURLs.count) dropped item(s)."
-            }
+            self.setInputURLs(accumulator.urls)
         }
 
         return true
+    }
+
+    func chooseDocuments() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.image, .pdf]
+        panel.message = "Choose images, PDFs, or folders to read."
+        panel.prompt = "Choose Documents"
+
+        if panel.runModal() == .OK {
+            setInputURLs(panel.urls)
+        }
     }
 
     func chooseOutputDirectory() {
@@ -238,6 +241,7 @@ final class AppViewModel: ObservableObject {
         }
 
         isProcessing = true
+        ReviewPreviewRenderer.clearSourceImageCache()
         generatedFiles = []
         reviewReport = nil
         fullReviewState = nil
@@ -275,7 +279,7 @@ final class AppViewModel: ObservableObject {
                     usesLanguageCorrection: true,
                     pdfTextMode: pdfTextMode
                 )
-                let results = try OCRService(options: requestOptions).process(urls: resolvedURLs) { update in
+                let results = try await OCRService(options: requestOptions).processStructured(urls: resolvedURLs) { update in
                     Task { @MainActor in
                         self.applyProgress(update, startedAt: startedAt)
                     }
@@ -358,7 +362,6 @@ final class AppViewModel: ObservableObject {
         let translationProvider = translationProvider
         let translationTarget = translationTarget
         let openAITranslationModel = openAITranslationModel
-        let openAIAPIKey = openAIAPIKey
 
         isProcessing = true
         isTranslatingReviewedDocument = false
@@ -387,6 +390,21 @@ final class AppViewModel: ObservableObject {
         }
 
         if translateReviewedDocument {
+            let openAIAPIKey: String
+            if translationProvider == .openAI {
+                guard let savedKey = loadOpenAIAPIKeyForTranslation() else {
+                    completeReviewedExport(
+                        using: artifacts,
+                        payload: payload,
+                        translationErrorMessage: translationErrorMessage ?? "OpenAI translation was unavailable."
+                    )
+                    return
+                }
+                openAIAPIKey = savedKey
+            } else {
+                openAIAPIKey = ""
+            }
+
             if !canTranslateReviewedDocument {
                 completeReviewedExport(
                     using: artifacts,
@@ -469,11 +487,35 @@ final class AppViewModel: ObservableObject {
         case .openAI:
             let normalizedKey = openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
             if normalizedKey.isEmpty {
-                translationAvailability = .unavailable("Add an OpenAI API key to enable cloud translation.")
+                translationAvailability = .checking("Your saved OpenAI key will be checked when you choose export.")
             } else {
                 translationAvailability = .available("OpenAI translation is ready using your saved API key.")
             }
         }
+    }
+
+    private func loadOpenAIAPIKeyForTranslation() -> String? {
+        do {
+            if let savedKey = try OpenAIKeychainStore().loadAPIKey() {
+                openAIAPIKey = savedKey
+            }
+        } catch {
+            let message = "Could not read the saved OpenAI API key. Your OCR files can still be saved without translation. \(error.localizedDescription)"
+            translationAvailability = .unavailable(message)
+            translationErrorMessage = message
+            return nil
+        }
+
+        let normalizedKey = openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedKey.isEmpty else {
+            let message = "No OpenAI API key is available. Your OCR files can still be saved without translation."
+            translationAvailability = .unavailable(message)
+            translationErrorMessage = message
+            return nil
+        }
+
+        translationAvailability = .available("OpenAI translation is ready using your saved API key.")
+        return normalizedKey
     }
 
     func saveOpenAIAPIKey() {
@@ -616,6 +658,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func resetReviewState() {
+        ReviewPreviewRenderer.clearSourceImageCache()
         pendingExportPayload = nil
         pendingTranslationExport = nil
         reviewReport = nil
@@ -629,6 +672,18 @@ final class AppViewModel: ObservableObject {
         translationErrorMessage = nil
         isTranslatingReviewedDocument = false
         generatedFiles = []
+    }
+
+    private func setInputURLs(_ urls: [URL]) {
+        resetReviewState()
+        droppedURLs = urls.sorted(by: InputOrdering.isNaturalPageBefore)
+        if droppedURLs.isEmpty {
+            statusMessage = AppleVisionError.dropFailed.localizedDescription
+            statusDetail = "Try dropping files again."
+        } else {
+            statusMessage = "Waiting for Files"
+            statusDetail = "Ready to process \(droppedURLs.count) dropped item(s)."
+        }
     }
 
     func reviewText(for issue: OCRReviewIssue) -> String {
@@ -815,6 +870,9 @@ final class AppViewModel: ObservableObject {
             line.id = FullDocumentReviewState.lineID(sourcePath: sourcePath, pageNumber: pageNumber, lineIndex: index + 1)
             line.lineIndex = index + 1
             return line
+        }
+        if rebuiltLines.count != existingLines.count {
+            state.pages[pageIndex].structure = nil
         }
         state.selectedLineIndexByPageID[state.pages[pageIndex].id] = normalizedSelectedLineIndex(
             for: state.pages[pageIndex],
@@ -1099,7 +1157,7 @@ final class AppViewModel: ObservableObject {
 
     nonisolated private static func renderReviewedPlainText(from results: [OCRResult]) -> String {
         results
-            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .map { $0.structuredText.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n") + "\n"
     }
@@ -1135,7 +1193,8 @@ final class AppViewModel: ObservableObject {
                 id: FullDocumentReviewState.pageID(sourcePath: result.sourcePath, pageNumber: result.pageNumber),
                 sourcePath: result.sourcePath,
                 pageNumber: result.pageNumber,
-                lines: lines
+                lines: lines,
+                structure: result.structure
             )
         }
 
@@ -1173,7 +1232,8 @@ final class AppViewModel: ObservableObject {
                         candidates: line.candidates,
                         words: line.hasChanges ? [] : line.words
                     )
-                }
+                },
+                structure: page.structure
             )
         }
     }
@@ -1196,6 +1256,7 @@ final class AppViewModel: ObservableObject {
                 outputDirectory: payload.outputDirectory
             )
             generatedFiles = writtenFiles
+            ReviewPreviewRenderer.clearSourceImageCache()
             pendingExportPayload = nil
             pendingTranslationExport = nil
             fullReviewState = nil
@@ -1289,6 +1350,7 @@ struct ReviewedPage: Identifiable, Sendable {
     let sourcePath: String
     let pageNumber: Int?
     var lines: [ReviewedLine]
+    var structure: OCRDocumentStructure?
 
     var lineCount: Int {
         lines.count

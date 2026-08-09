@@ -8,6 +8,14 @@ import Translation
 struct ContentView: View {
     @StateObject private var viewModel = AppViewModel()
     @State private var isTargeted = false
+    @State private var advancedOptionsExpanded = false
+    @State private var fullReviewTextScale: CGFloat = 1
+    @State private var hoveredReviewLineID: String?
+    @ScaledMetric(relativeTo: .body) private var fullReviewTextBaseSize: CGFloat = 18
+
+    private var fullReviewTextSize: CGFloat {
+        fullReviewTextBaseSize * fullReviewTextScale
+    }
 
     private var statusStyle: ViewStatusStyle {
         if viewModel.isProcessing {
@@ -38,22 +46,25 @@ struct ContentView: View {
         return "\(names.prefix(2).joined(separator: " | ")) + \(names.count - 2) more"
     }
 
+    private var isReviewActive: Bool {
+        viewModel.hasPendingExport && viewModel.reviewReport?.issues.isEmpty == false
+    }
+
     var body: some View {
         translationManagedContent {
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
-                    sidebar
-                    Divider().opacity(0.5)
+                    if !isReviewActive {
+                        sidebar
+                        Divider()
+                    }
                     workspace
                 }
                 footerBar
             }
         }
         .background(windowBackground)
-        .frame(minWidth: 980, idealWidth: 1180, minHeight: 640, idealHeight: 700)
-        .animation(.easeInOut(duration: 0.18), value: isTargeted)
-        .animation(.easeInOut(duration: 0.18), value: viewModel.isProcessing)
-        .animation(.easeInOut(duration: 0.18), value: viewModel.generatedFiles)
+        .frame(minWidth: 900, idealWidth: 1240, minHeight: 620, idealHeight: 820)
         .task {
             await viewModel.refreshTranslationAvailability()
         }
@@ -95,31 +106,7 @@ struct ContentView: View {
     }
 
     private var windowBackground: some View {
-        ZStack {
-            Color(nsColor: .windowBackgroundColor)
-
-            LinearGradient(
-                colors: [
-                    Color(red: 0.03, green: 0.05, blue: 0.12),
-                    Color(red: 0.05, green: 0.07, blue: 0.14),
-                    Color.black.opacity(0.96),
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            RadialGradient(
-                colors: [
-                    Color.white.opacity(0.12),
-                    Color.clear,
-                ],
-                center: .top,
-                startRadius: 40,
-                endRadius: 520
-            )
-            .blendMode(.screen)
-        }
-        .ignoresSafeArea()
+        Color(nsColor: .windowBackgroundColor)
     }
 
     private var sidebar: some View {
@@ -127,92 +114,63 @@ struct ContentView: View {
             sidebarHeader
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 20) {
-                    sidebarSection(title: "Output Mode", footnote: "Choose which Arabic text variant to write when text files are included.") {
-                        modeOptionRow(
-                            title: "Both Versions",
-                            subtitle: "With harakat and without harakat",
-                            symbol: "square.grid.2x2",
-                            isSelected: viewModel.outputMode == .both
-                        ) {
-                            viewModel.outputMode = .both
-                        }
-                        modeOptionRow(
-                            title: "With Harakat",
-                            subtitle: "Keep vowel marks in the output",
-                            symbol: "text.line.first.and.arrowtriangle.forward",
-                            isSelected: viewModel.outputMode == .withHarakat
-                        ) {
-                            viewModel.outputMode = .withHarakat
-                        }
-                        modeOptionRow(
-                            title: "Without Harakat",
-                            subtitle: "Remove vowel marks after OCR",
-                            symbol: "eye.slash",
-                            isSelected: viewModel.outputMode == .withoutHarakat
-                        ) {
-                            viewModel.outputMode = .withoutHarakat
-                        }
-                    }
-
-                    sidebarSection(title: "Export Format", footnote: "Choose whether to write text files, a searchable PDF, or both.") {
-                        modeOptionRow(
-                            title: "Text Files",
-                            subtitle: "Write the current `.txt` exports only",
-                            symbol: "doc.text",
-                            isSelected: viewModel.exportChoice == .text
-                        ) {
-                            viewModel.exportChoice = .text
-                        }
-                        modeOptionRow(
-                            title: "Searchable PDF",
-                            subtitle: "Write one searchable PDF with embedded text",
-                            symbol: "doc.richtext",
-                            isSelected: viewModel.exportChoice == .searchablePDF
-                        ) {
-                            viewModel.exportChoice = .searchablePDF
-                        }
-                        modeOptionRow(
-                            title: "Both",
-                            subtitle: "Write the text files and the searchable PDF",
-                            symbol: "square.stack.3d.up",
-                            isSelected: viewModel.exportChoice == .both
-                        ) {
-                            viewModel.exportChoice = .both
-                        }
-                    }
-
-                    sidebarSection(title: "PDF Handling", footnote: "Force OCR when a PDF's text layer is unreliable.") {
-                        modeOptionRow(
-                            title: "Prefer PDF Text",
-                            subtitle: "Use embedded text first when available",
-                            symbol: "doc.text",
-                            isSelected: viewModel.pdfTextMode == .preferEmbeddedText
-                        ) {
-                            viewModel.pdfTextMode = .preferEmbeddedText
-                        }
-                        modeOptionRow(
-                            title: "Force OCR",
-                            subtitle: "Render each PDF page and OCR the image",
-                            symbol: "exclamationmark.circle",
-                            isSelected: viewModel.pdfTextMode == .ocrOnly
-                        ) {
-                            viewModel.pdfTextMode = .ocrOnly
-                        }
-                    }
-
-                    sidebarSection(title: "Review Checkpoint", footnote: "Pause before export when OCR finds risky lines.") {
-                        Toggle(isOn: $viewModel.reviewBeforeExport) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Review Low-Confidence Lines")
-                                Text("Show suspicious lines and suggested fixes before writing files")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .toggleStyle(.switch)
-                    }
-
                     outputFolderSection
+
+                    DisclosureGroup(isExpanded: $advancedOptionsExpanded) {
+                        VStack(alignment: .leading, spacing: 20) {
+                            sidebarSection(title: "Output Mode", footnote: "Choose which Arabic text version to save when text files are included.") {
+                                modeOptionRow(title: "Both Versions", subtitle: "With and without vowel marks", symbol: "square.grid.2x2", isSelected: viewModel.outputMode == .both) {
+                                    viewModel.outputMode = .both
+                                }
+                                modeOptionRow(title: "With Vowel Marks", subtitle: "Keep vowel marks in the text", symbol: "text.line.first.and.arrowtriangle.forward", isSelected: viewModel.outputMode == .withHarakat) {
+                                    viewModel.outputMode = .withHarakat
+                                }
+                                modeOptionRow(title: "Without Vowel Marks", subtitle: "Remove vowel marks after reading", symbol: "eye.slash", isSelected: viewModel.outputMode == .withoutHarakat) {
+                                    viewModel.outputMode = .withoutHarakat
+                                }
+                            }
+
+                            sidebarSection(title: "File Type", footnote: "Choose text files, a searchable PDF, or both.") {
+                                modeOptionRow(title: "Text Files", subtitle: "Save text files only", symbol: "doc.text", isSelected: viewModel.exportChoice == .text) {
+                                    viewModel.exportChoice = .text
+                                }
+                                modeOptionRow(title: "Searchable PDF", subtitle: "Save a PDF you can search", symbol: "doc.richtext", isSelected: viewModel.exportChoice == .searchablePDF) {
+                                    viewModel.exportChoice = .searchablePDF
+                                }
+                                modeOptionRow(title: "Both", subtitle: "Save text files and a searchable PDF", symbol: "square.stack.3d.up", isSelected: viewModel.exportChoice == .both) {
+                                    viewModel.exportChoice = .both
+                                }
+                            }
+
+                            sidebarSection(title: "PDF Reading", footnote: "Use this only when a PDF's existing text is wrong.") {
+                                modeOptionRow(title: "Use PDF Text First", subtitle: "Read existing PDF text when available", symbol: "doc.text", isSelected: viewModel.pdfTextMode == .preferEmbeddedText) {
+                                    viewModel.pdfTextMode = .preferEmbeddedText
+                                }
+                                modeOptionRow(title: "Read Every Page", subtitle: "Read each PDF page as an image", symbol: "exclamationmark.circle", isSelected: viewModel.pdfTextMode == .ocrOnly) {
+                                    viewModel.pdfTextMode = .ocrOnly
+                                }
+                            }
+
+                            sidebarSection(title: "Review Before Saving", footnote: "Pause when the app finds text it is less sure about.") {
+                                Toggle("Review uncertain lines", isOn: $viewModel.reviewBeforeExport)
+                                    .toggleStyle(.switch)
+                            }
+
+                            Button("Open Logs") {
+                                viewModel.openLogs()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.large)
+                            .frame(maxWidth: .infinity)
+                        }
+                        .padding(.top, 14)
+                    } label: {
+                        Label("Advanced Options", systemImage: "slider.horizontal.3")
+                            .font(.body.weight(.semibold))
+                    }
+                    .padding(16)
+                    .background(sidebarPanelFill)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
                 .padding(18)
             }
@@ -227,11 +185,11 @@ struct ContentView: View {
 
     private var sidebarHeader: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("AppleVision OCR")
+            Text("Read Documents")
                 .font(.system(size: 26, weight: .semibold))
 
-            Text("Native OCR utility for images and PDFs")
-                .font(.callout)
+            Text("Turn images and PDFs into text you can save.")
+                .font(.body)
                 .foregroundStyle(.secondary)
         }
         .padding(18)
@@ -253,7 +211,7 @@ struct ContentView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 1)
         )
     }
 
@@ -278,26 +236,26 @@ struct ContentView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(isSelected ? Color.accentColor.opacity(0.14) : Color.white.opacity(0.03))
+            .background(isSelected ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.08))
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
     }
 
     private var outputFolderSection: some View {
-        sidebarSection(title: "Output Folder", footnote: "Generated text files and PDFs are written in this folder.") {
+        sidebarSection(title: "Save Folder", footnote: "Your text files and searchable PDFs will be saved here.") {
             VStack(alignment: .leading, spacing: 10) {
                 Text(viewModel.outputDirectory.path)
                     .textSelection(.enabled)
-                    .font(.system(.footnote, design: .monospaced))
+                    .font(.body)
                     .lineLimit(2)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.white.opacity(0.04))
+                    .background(Color.secondary.opacity(0.08))
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-                Button("Choose Folder") {
+                Button("Choose Save Folder") {
                     viewModel.chooseOutputDirectory()
                 }
                 .buttonStyle(.borderedProminent)
@@ -328,12 +286,6 @@ struct ContentView: View {
             .controlSize(.large)
             .frame(maxWidth: .infinity)
 
-            Button("Open Logs") {
-                viewModel.openLogs()
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            .frame(maxWidth: .infinity)
         }
         .padding(18)
         .background(.regularMaterial.opacity(0.76))
@@ -376,30 +328,17 @@ struct ContentView: View {
     }
 
     private var workspaceBackground: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color.black.opacity(0.15),
-                    Color.clear,
-                    Color.black.opacity(0.25),
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            RoundedRectangle(cornerRadius: 0, style: .continuous)
-                .fill(.black.opacity(0.12))
-        }
+        Color(nsColor: .windowBackgroundColor)
     }
 
     private var dropZone: some View {
         VStack(spacing: 18) {
             Image(systemName: viewModel.isProcessing ? "waveform.path.ecg" : "doc.text.viewfinder")
                 .font(.system(size: 46, weight: .light))
-                .foregroundStyle(isTargeted ? Color.accentColor : Color.white.opacity(0.85))
+                .foregroundStyle(isTargeted ? Color.accentColor : .primary)
 
             VStack(spacing: 10) {
-                Text(viewModel.isProcessing ? "Processing Files" : "Drop Files or Folders Here")
+                Text(viewModel.isProcessing ? "Reading Documents" : "Drop Documents Here")
                     .font(.system(size: 23, weight: .semibold))
 
                 Text(viewModel.isProcessing ? processingSubtitle : droppedSummary)
@@ -430,27 +369,19 @@ struct ContentView: View {
                 Label("\(viewModel.droppedURLs.count) item\(viewModel.droppedURLs.count == 1 ? "" : "s") ready", systemImage: "checkmark.circle.fill")
                     .font(.callout.weight(.medium))
                     .foregroundStyle(.secondary)
+            } else {
+                Button("Choose Documents") {
+                    viewModel.chooseDocuments()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
             }
         }
         .frame(maxWidth: 720)
-        .frame(height: 390)
+        .frame(height: 280)
         .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(.regularMaterial.opacity(0.74))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 26, style: .continuous)
-                        .strokeBorder(Color.white.opacity(isTargeted ? 0.24 : 0.12), lineWidth: isTargeted ? 1.6 : 1)
-                )
-                .shadow(color: Color.black.opacity(0.22), radius: 22, y: 14)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-                .padding(20)
-        )
-        .scaleEffect(isTargeted ? 1.01 : 1)
-        .opacity(viewModel.isProcessing ? 0.98 : 1)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color(nsColor: .separatorColor)))
         .onDrop(of: [UTType.fileURL], isTargeted: $isTargeted) { providers in
             viewModel.handleDrop(providers: providers)
         }
@@ -460,7 +391,7 @@ struct ContentView: View {
         if let label = viewModel.currentProcessingLabel {
             return label
         }
-        return "OCR is running with Arabic defaults."
+        return "Reading your documents with Arabic support."
     }
 
     private var buttonTitle: String {
@@ -470,7 +401,7 @@ struct ContentView: View {
         if viewModel.hasPendingExport {
             return "Export Files"
         }
-        return "Process Files"
+        return "Read Documents"
     }
 
     private var generatedFilesPanel: some View {
@@ -494,11 +425,11 @@ struct ContentView: View {
         .frame(maxWidth: 720)
         .frame(maxWidth: .infinity, alignment: .center)
         .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.thinMaterial.opacity(0.7))
-                .overlay(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                        .fill(.thinMaterial.opacity(0.7))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 1)
                 )
         )
     }
@@ -526,12 +457,12 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background(Color.white.opacity(0.05))
+                    .background(Color.secondary.opacity(0.12))
                     .clipShape(Capsule())
             }
         }
         .padding(12)
-        .background(Color.white.opacity(0.04))
+        .background(Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
@@ -562,58 +493,60 @@ struct ContentView: View {
     }
 
     private func checkpointReviewPanel(_ report: OCRReviewReport) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top) {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(alignment: .top, spacing: 20) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Review Checkpoint")
-                        .font(.headline)
-                    Text("Check the suspicious lines first, then either export now or continue into the full reading desk for page-by-page review.")
-                        .font(.footnote)
+                        .font(.title2.weight(.semibold))
+                    Text("Check the marked lines, then continue reviewing or save your work now.")
+                        .font(.body)
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer()
 
                 if viewModel.hasPendingExport {
-                    VStack(alignment: .trailing, spacing: 8) {
+                    VStack(alignment: .trailing, spacing: 12) {
                         HStack(spacing: 8) {
-                            pageCountBadge(title: "Critical", count: report.criticalCount, color: Color.red.opacity(0.9))
-                            pageCountBadge(title: "Warnings", count: report.warningCount, color: Color.orange.opacity(0.9))
+                            pageCountBadge(title: "Critical", count: report.criticalCount, color: .red)
+                            pageCountBadge(title: "Warnings", count: report.warningCount, color: .orange)
                             pageCountBadge(title: "Pages", count: affectedPageCount(report), color: .secondary)
                         }
 
                         HStack(spacing: 8) {
-                            Button("Use All Suggestions") {
-                                viewModel.useSuggestedTextForAll()
+                            Menu("More Actions") {
+                                Button("Use All Suggestions") {
+                                    viewModel.useSuggestedTextForAll()
+                                }
+                                Button("Use Critical Suggestions") {
+                                    viewModel.useSuggestedTextForCritical()
+                                }
+                                Button("Jump to First Marked Page") {
+                                    viewModel.jumpToFirstFlaggedReviewPage()
+                                }
+                                Divider()
+                                Button("Restore All OCR Text") {
+                                    viewModel.restoreAllOCRText()
+                                }
                             }
                             .buttonStyle(.bordered)
+                            .controlSize(.large)
+                            .frame(minHeight: 44)
 
-                            Button("Use Critical Only") {
-                                viewModel.useSuggestedTextForCritical()
-                            }
-                            .buttonStyle(.bordered)
-
-                            Button("Jump to First Flagged") {
-                                viewModel.jumpToFirstFlaggedReviewPage()
-                            }
-                            .buttonStyle(.bordered)
-
-                            Button("Restore All OCR") {
-                                viewModel.restoreAllOCRText()
-                            }
-                            .buttonStyle(.bordered)
-                        }
-
-                        HStack(spacing: 8) {
                             Button("Export Now") {
                                 viewModel.exportPendingOutputs()
                             }
                             .buttonStyle(.bordered)
+                            .controlSize(.large)
+                            .frame(minHeight: 44)
+                            .disabled(viewModel.isProcessing)
 
-                            Button("Continue To Full Review") {
+                            Button("Continue Review") {
                                 viewModel.openFullReview()
                             }
                             .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                            .frame(minHeight: 44)
                         }
                     }
                 }
@@ -627,132 +560,177 @@ struct ContentView: View {
 
             checkpointUtilitiesPanel
         }
-        .padding(18)
-        .frame(maxWidth: 760)
+        .padding(24)
+        .frame(maxWidth: 1240)
         .frame(maxWidth: .infinity, alignment: .center)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.thinMaterial.opacity(0.7))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-                )
-        )
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color(nsColor: .separatorColor)))
     }
 
     private var fullReviewWorkspace: some View {
         Group {
             if let fullReviewState = viewModel.fullReviewState,
                let selectedPage = viewModel.selectedReviewPage {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 14) {
                     fullReviewToolbar(fullReviewState: fullReviewState, selectedPage: selectedPage)
 
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(Array(fullReviewState.pages.enumerated()), id: \.element.id) { index, page in
-                                Button {
-                                    viewModel.selectReviewPage(index: index)
-                                } label: {
-                                    reviewPageChip(
-                                        page: page,
-                                        index: index,
-                                        isSelected: index == fullReviewState.selectedPageIndex
-                                    )
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.horizontal, 28)
-                    }
-
                     fullReviewWorkspaceBody(selectedPage)
-                    .padding(.horizontal, 28)
-                    .padding(.bottom, 24)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 20)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
-                .padding(.top, 24)
+                .padding(.top, 20)
             }
         }
     }
 
     private func fullReviewToolbar(fullReviewState: FullDocumentReviewState, selectedPage: ReviewedPage) -> some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Full Review Workspace")
-                    .font(.headline)
-                Text(reviewPageTitle(selectedPage))
-                    .font(.footnote.monospaced())
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                Button("Back To Checkpoint") {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Review")
+                        .font(.title2.weight(.semibold))
+                    Text(reviewPageTitle(selectedPage))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Button("Back") {
                     viewModel.returnToCheckpointReview()
                 }
                 .buttonStyle(.bordered)
+                .controlSize(.large)
 
+                Menu("More") {
+                    Button("Reveal Source") {
+                        viewModel.revealSource(for: selectedPage)
+                    }
+                }
+                .buttonStyle(.bordered)
+
+                Button("Export") {
+                    viewModel.exportPendingOutputs()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(viewModel.isProcessing)
+            }
+
+            HStack(spacing: 10) {
                 Button("Previous") {
+                    hoveredReviewLineID = nil
                     viewModel.goToPreviousReviewPage()
                 }
                 .buttonStyle(.bordered)
                 .disabled(!viewModel.canGoToPreviousReviewPage)
 
-                Text("Page \(fullReviewState.selectedPageIndex + 1) of \(fullReviewState.pages.count)")
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(.secondary)
-
-                Picker("Review Mode", selection: Binding(
-                    get: { viewModel.fullReviewMode },
-                    set: { viewModel.selectFullReviewMode($0) }
+                Picker("Page", selection: Binding(
+                    get: { fullReviewState.selectedPageIndex },
+                    set: {
+                        hoveredReviewLineID = nil
+                        viewModel.selectReviewPage(index: $0)
+                    }
                 )) {
-                    ForEach(FullReviewMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+                    ForEach(Array(fullReviewState.pages.enumerated()), id: \.element.id) { index, page in
+                        Text("\(pageChipTitle(page, index: index)) · \(page.issueCount) marked").tag(index)
                     }
                 }
-                .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 210)
+                .frame(width: 190)
 
                 Button("Next") {
+                    hoveredReviewLineID = nil
                     viewModel.goToNextReviewPage()
                 }
                 .buttonStyle(.bordered)
                 .disabled(!viewModel.canGoToNextReviewPage)
 
-                Button("Reveal Source") {
-                    viewModel.revealSource(for: selectedPage)
-                }
-                .buttonStyle(.bordered)
+                Text("\(fullReviewState.selectedPageIndex + 1) of \(fullReviewState.pages.count)")
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
 
-                Button("Export Reviewed Files") {
-                    viewModel.exportPendingOutputs()
+                Picker("Review mode", selection: Binding(
+                    get: { viewModel.fullReviewMode },
+                    set: {
+                        hoveredReviewLineID = nil
+                        viewModel.selectFullReviewMode($0)
+                    }
+                )) {
+                    Text("Page").tag(FullReviewMode.page)
+                    Text("Line").tag(FullReviewMode.line)
                 }
-                .buttonStyle(.borderedProminent)
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 140)
+
+                Divider()
+                    .frame(height: 28)
+
+                HStack(spacing: 4) {
+                    Button {
+                        fullReviewTextScale = max(0.75, fullReviewTextScale - 0.25)
+                    } label: {
+                        Image(systemName: "minus")
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .disabled(fullReviewTextScale <= 0.75)
+                    .accessibilityLabel("Decrease review text size")
+                    .help("Makes Full Review text smaller, down to 75 percent.")
+
+                    Button("\(Int(fullReviewTextScale * 100))%") {
+                        fullReviewTextScale = 1
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(minWidth: 56, minHeight: 44)
+                    .accessibilityLabel("Reset review text size to 100 percent")
+                    .help("Restores the default Full Review text size.")
+
+                    Button {
+                        fullReviewTextScale += 0.25
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .accessibilityLabel("Increase review text size")
+                    .help("Makes Full Review text larger.")
+                }
             }
         }
-        .padding(.horizontal, 28)
+        .padding(.horizontal, 20)
     }
 
     @ViewBuilder
     private func fullReviewWorkspaceBody(_ page: ReviewedPage) -> some View {
         switch viewModel.fullReviewMode {
         case .page:
-            HStack(alignment: .top, spacing: 16) {
+            HSplitView {
                 reviewPagePreviewCard(page)
+                    .frame(minWidth: 360, idealWidth: 520)
                 reviewPageTextEditorCard(page)
+                    .frame(minWidth: 420, idealWidth: 620)
             }
         case .line:
-            reviewLineReviewCard(page)
+            HSplitView {
+                reviewLineSourcePreviewCard(page, highlightBox: highlightedReviewLineBoundingBox(in: page))
+                    .frame(minWidth: 360, idealWidth: 520)
+                reviewLineReviewCard(page)
+                    .frame(minWidth: 420, idealWidth: 620)
+                    .id(page.id)
+            }
         }
     }
 
     private func checkpointIssueRow(_ issue: OCRReviewIssue) -> some View {
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: 20) {
             CheckpointIssuePreview(issue: issue)
+                .frame(width: 300)
 
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(issueLocation(issue))
@@ -766,10 +744,10 @@ struct ContentView: View {
 
                     Text(issue.severity.displayName)
                         .font(.footnote.weight(.medium))
-                        .foregroundStyle(issue.severity == .critical ? Color.red.opacity(0.9) : Color.orange.opacity(0.9))
+                        .foregroundStyle(issue.severity == .critical ? Color.red : Color.orange)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .background(Color.white.opacity(0.05))
+                        .background(Color(nsColor: .textBackgroundColor))
                         .clipShape(Capsule())
                 }
 
@@ -778,7 +756,8 @@ struct ContentView: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Text(issue.originalText)
-                        .font(.body.monospaced())
+                        .font(.system(size: 18))
+                        .lineSpacing(4)
                         .textSelection(.enabled)
                 }
 
@@ -795,35 +774,32 @@ struct ContentView: View {
                         axis: .vertical
                     )
                     .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 18))
                     .lineLimit(1...4)
                 }
 
-                HStack(spacing: 8) {
+                Menu("Line Actions") {
                     if issue.suggestedText != nil {
-                        Button("Use Suggestion") {
+                        Button("Use Suggested Text") {
                             viewModel.useSuggestedText(for: issue)
                         }
-                        .buttonStyle(.bordered)
                     }
-
-                    Button("Restore OCR") {
+                    Button("Restore OCR Text") {
                         viewModel.restoreOriginalText(for: issue)
                     }
-                    .buttonStyle(.bordered)
-
                     Button(viewModel.isGeneratingAppleIntelligenceSuggestion(for: issue) ? "Asking Apple Intelligence..." : "Ask Apple Intelligence") {
                         viewModel.suggestWithAppleIntelligence(for: issue)
                     }
-                    .buttonStyle(.bordered)
                     .disabled(!viewModel.canUseAppleIntelligence || viewModel.isGeneratingAppleIntelligenceSuggestion(for: issue))
-
                     if viewModel.appleIntelligenceSuggestion(for: issue) != nil {
                         Button("Use AI Suggestion") {
                             viewModel.useAppleIntelligenceSuggestion(for: issue)
                         }
-                        .buttonStyle(.borderedProminent)
                     }
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .frame(minHeight: 44)
 
                 if let suggestedText = issue.suggestedText {
                     Label(suggestedText, systemImage: "wand.and.stars")
@@ -835,7 +811,7 @@ struct ContentView: View {
                 if let aiSuggestion = viewModel.appleIntelligenceSuggestion(for: issue) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(aiSuggestion.correctedText)
-                            .font(.callout.monospaced())
+                            .font(.system(size: 18))
                             .textSelection(.enabled)
                         Text(aiSuggestion.reason)
                             .font(.footnote)
@@ -848,13 +824,9 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(14)
-        .background(Color.white.opacity(0.035))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
-        )
+        .padding(18)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color(nsColor: .separatorColor)))
     }
 
     private var checkpointUtilitiesPanel: some View {
@@ -881,22 +853,28 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
             .padding(14)
-            .background(Color.white.opacity(0.03))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color(nsColor: .separatorColor)))
 
-            checkpointTranslationPanel
+            DisclosureGroup("Translation") {
+                checkpointTranslationPanel
+                    .padding(.top, 8)
+            }
+            .font(.subheadline.weight(.semibold))
         }
     }
 
     private var checkpointTranslationPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Export Options")
+            Text("Translate the saved text")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Toggle("", isOn: $viewModel.translateReviewedDocument)
+                Toggle("Translate the saved text", isOn: $viewModel.translateReviewedDocument)
                     .labelsHidden()
                     .disabled(viewModel.isProcessing)
+                    .accessibilityLabel("Translate the saved text")
+                    .help("Adds a translated version when you export.")
             }
 
             HStack {
@@ -974,8 +952,7 @@ struct ContentView: View {
             }
         }
         .padding(14)
-        .background(Color.white.opacity(0.03))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func reviewPagePreviewCard(_ page: ReviewedPage) -> some View {
@@ -999,12 +976,33 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.white.opacity(0.04))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color(nsColor: .separatorColor)))
+    }
+
+    private func reviewLineSourcePreviewCard(_ page: ReviewedPage, highlightBox: OCRBoundingBox?) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Source Preview")
+                    .font(.subheadline.weight(.semibold))
+                Text(URL(fileURLWithPath: page.sourcePath).lastPathComponent)
+                    .font(.footnote.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            ReviewPagePreview(page: page, highlightBox: highlightBox)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color(nsColor: .separatorColor)))
     }
 
     private func reviewPageTextEditorCard(_ page: ReviewedPage) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let isArabic = containsArabic(viewModel.pageReviewText(for: page))
+
+        return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("OCR Text")
@@ -1017,19 +1015,23 @@ struct ContentView: View {
                 pageIssueBadge(page)
             }
 
+            if let structure = page.structure, !structure.tables.isEmpty {
+                detectedTables(structure.tables, for: page)
+            }
+
             TextEditor(text: Binding(
                 get: { viewModel.pageReviewText(for: page) },
                 set: { viewModel.setPageReviewText($0, for: page) }
             ))
-            .font(.body.monospaced())
+            .font(.system(size: fullReviewTextSize))
             .scrollContentBackground(.hidden)
-            .padding(12)
-            .background(Color.black.opacity(0.18))
+            .lineSpacing(6 * fullReviewTextScale)
+            .multilineTextAlignment(isArabic ? .trailing : .leading)
+            .environment(\.layoutDirection, isArabic ? .rightToLeft : .leftToRight)
+            .padding(16)
+            .background(Color(nsColor: .textBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-            )
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color(nsColor: .separatorColor)))
 
             HStack {
                 Text("\(page.lineCount) OCR line\(page.lineCount == 1 ? "" : "s") on this page")
@@ -1046,8 +1048,72 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.white.opacity(0.04))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color(nsColor: .separatorColor)))
+    }
+
+    private func detectedTables(_ tables: [OCRTable], for page: ReviewedPage) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(tables.count == 1 ? "Detected Table" : "Detected Tables")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+            }
+
+            ForEach(Array(tables.enumerated()), id: \.offset) { index, table in
+                ScrollView([.horizontal, .vertical]) {
+                    detectedTableGrid(table, for: page)
+                        .padding(1)
+                }
+                .frame(maxHeight: 220)
+                .accessibilityLabel("Detected Table \(index + 1)")
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color(nsColor: .separatorColor)))
+    }
+
+    private func detectedTableGrid(_ table: OCRTable, for page: ReviewedPage) -> some View {
+        let rowCount = table.cells.map { $0.row + $0.rowSpan }.max() ?? 0
+        let columnCount = table.cells.map { $0.column + $0.columnSpan }.max() ?? 0
+
+        return Grid(horizontalSpacing: 0, verticalSpacing: 0) {
+            ForEach(0..<rowCount, id: \.self) { row in
+                GridRow {
+                    ForEach(0..<columnCount, id: \.self) { column in
+                        if let cell = table.cells.first(where: { $0.row == row && $0.column == column }) {
+                            detectedTableCell(cell, for: page)
+                                .gridCellColumns(cell.columnSpan)
+                        } else if !table.cells.contains(where: { cell in
+                            cell.row == row && cell.column < column && cell.column + cell.columnSpan > column
+                        }) {
+                            Color.clear
+                                .frame(minWidth: 120, minHeight: 44)
+                                .overlay(Rectangle().stroke(Color(nsColor: .separatorColor)))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func detectedTableCell(_ cell: OCRTableCell, for page: ReviewedPage) -> some View {
+        let editedText = cell.lineIndices.compactMap { lineIndex in
+            page.lines.indices.contains(lineIndex) ? page.lines[lineIndex].editedText : nil
+        }
+        let text = editedText.isEmpty ? cell.fallbackText : editedText.joined(separator: " ")
+        let isArabic = containsArabic(text)
+
+        return Text(text)
+            .font(.system(size: fullReviewTextSize))
+            .lineSpacing(4 * fullReviewTextScale)
+            .multilineTextAlignment(isArabic ? .trailing : .leading)
+            .frame(minWidth: 120, maxWidth: .infinity, minHeight: 44, alignment: isArabic ? .trailing : .leading)
+            .environment(\.layoutDirection, isArabic ? .rightToLeft : .leftToRight)
+            .padding(10)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .overlay(Rectangle().stroke(Color(nsColor: .separatorColor)))
     }
 
     private func reviewLineReviewCard(_ page: ReviewedPage) -> some View {
@@ -1056,7 +1122,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Line Review")
                         .font(.subheadline.weight(.semibold))
-                    Text("Inspect every line on this page with its cropped source")
+                    Text("Edit every line on this page")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -1074,8 +1140,13 @@ struct ContentView: View {
             if !page.lines.isEmpty {
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(page.lines) { line in
-                            compactLineReviewRow(line)
+                        ForEach(page.lines.indices, id: \.self) { index in
+                            let line = page.lines[index]
+                            compactLineReviewRow(
+                                line,
+                                index: index,
+                                isSelected: viewModel.selectedReviewLineIndex(in: page) == index
+                            )
                         }
                     }
                     .padding(.trailing, 4)
@@ -1096,24 +1167,71 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.white.opacity(0.04))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color(nsColor: .separatorColor)))
+        .onDisappear {
+            hoveredReviewLineID = nil
+        }
     }
 
-    private func compactLineReviewRow(_ line: ReviewedLine) -> some View {
-        HStack(alignment: .top, spacing: 14) {
-            CompactReviewLinePreview(line: line)
+    private func compactLineReviewRow(_ line: ReviewedLine, index: Int, isSelected: Bool) -> some View {
+        let isHovered = hoveredReviewLineID == line.id
+        let fill = isSelected
+            ? Color.accentColor.opacity(0.18)
+            : isHovered ? Color.accentColor.opacity(0.09) : Color(nsColor: .textBackgroundColor)
+        let border = isSelected
+            ? Color.accentColor.opacity(0.72)
+            : isHovered ? Color.accentColor.opacity(0.42) : Color(nsColor: .separatorColor)
 
+        return VStack(alignment: .leading, spacing: 8) {
             selectedLineEditorBody(line)
-                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if line.boundingBox == nil {
+                Text("Source location unavailable")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
-        .padding(12)
-        .background(Color.white.opacity(0.03))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
-        )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(fill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(border, lineWidth: isSelected ? 2 : 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .onHover { isHovering in
+                if isHovering {
+                    hoveredReviewLineID = line.id
+                } else if hoveredReviewLineID == line.id {
+                    hoveredReviewLineID = nil
+                }
+            }
+            .simultaneousGesture(TapGesture().onEnded {
+                viewModel.selectReviewLine(index: index)
+            })
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Line \(line.lineIndex)")
+            .accessibilityValue(isSelected ? "Selected" : "Not selected")
+            .accessibilityHint("Selects this line and highlights its source.")
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+            .accessibilityAction(named: "Select line") {
+                viewModel.selectReviewLine(index: index)
+            }
+    }
+
+    private func highlightedReviewLineBoundingBox(in page: ReviewedPage) -> OCRBoundingBox? {
+        if let hoveredReviewLineID,
+           let hoveredLine = page.lines.first(where: { $0.id == hoveredReviewLineID }) {
+            return hoveredLine.boundingBox
+        }
+
+        guard let selectedIndex = viewModel.selectedReviewLineIndex(in: page),
+              page.lines.indices.contains(selectedIndex)
+        else {
+            return nil
+        }
+        return page.lines[selectedIndex].boundingBox
     }
 
     private func reviewLineRow(_ line: ReviewedLine) -> some View {
@@ -1137,7 +1255,7 @@ struct ContentView: View {
                         .foregroundStyle(issue.severity == .critical ? Color.red.opacity(0.9) : Color.orange.opacity(0.9))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(Color.white.opacity(0.05))
+                        .background(Color.secondary.opacity(0.12))
                         .clipShape(Capsule())
                 }
             }
@@ -1149,7 +1267,7 @@ struct ContentView: View {
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         Text(issue.originalText)
-                            .font(.body.monospaced())
+                            .font(.system(size: 18))
                             .textSelection(.enabled)
                     }
                 } else {
@@ -1158,7 +1276,7 @@ struct ContentView: View {
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         Text(line.originalText)
-                            .font(.body.monospaced())
+                            .font(.system(size: 18))
                             .textSelection(.enabled)
                     }
                 }
@@ -1267,7 +1385,7 @@ struct ContentView: View {
         }
         .padding(.vertical, 10)
         .padding(.horizontal, 12)
-        .background(issue == nil ? Color.clear : Color.white.opacity(0.025))
+        .background(issue == nil ? Color.clear : Color.secondary.opacity(0.06))
         .overlay(alignment: .leading) {
             if let issue {
                 Rectangle()
@@ -1283,6 +1401,11 @@ struct ContentView: View {
 
     private func selectedLineEditorBody(_ line: ReviewedLine) -> some View {
         let issue = line.issue
+        let originalText = issue?.originalText ?? line.originalText
+        let exportText = viewModel.reviewText(for: line)
+        let originalTextIsArabic = containsArabic(originalText)
+        let exportTextIsArabic = containsArabic(exportText)
+
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -1302,7 +1425,7 @@ struct ContentView: View {
                         .foregroundStyle(issue.severity == .critical ? Color.red.opacity(0.9) : Color.orange.opacity(0.9))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(Color.white.opacity(0.05))
+                        .background(Color.secondary.opacity(0.12))
                         .clipShape(Capsule())
                 }
             }
@@ -1311,8 +1434,11 @@ struct ContentView: View {
                 Text(issue == nil ? "OCR Line" : "Current OCR")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                Text(issue?.originalText ?? line.originalText)
-                    .font(.body.monospaced())
+                Text(originalText)
+                    .font(.system(size: fullReviewTextSize))
+                    .multilineTextAlignment(originalTextIsArabic ? .trailing : .leading)
+                    .frame(maxWidth: .infinity, alignment: originalTextIsArabic ? .trailing : .leading)
+                    .environment(\.layoutDirection, originalTextIsArabic ? .rightToLeft : .leftToRight)
                     .textSelection(.enabled)
             }
 
@@ -1329,7 +1455,10 @@ struct ContentView: View {
                     axis: .vertical
                 )
                 .textFieldStyle(.roundedBorder)
+                .font(.system(size: fullReviewTextSize))
                 .lineLimit(1...6)
+                .multilineTextAlignment(exportTextIsArabic ? .trailing : .leading)
+                .environment(\.layoutDirection, exportTextIsArabic ? .rightToLeft : .leftToRight)
             }
 
             if let issue {
@@ -1442,11 +1571,11 @@ struct ContentView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(isSelected ? Color.accentColor.opacity(0.18) : Color.white.opacity(0.04))
+        .background(isSelected ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(isSelected ? Color.accentColor.opacity(0.4) : Color.white.opacity(0.08), lineWidth: 1)
+                .strokeBorder(isSelected ? Color.accentColor.opacity(0.4) : Color.secondary.opacity(0.2), lineWidth: 1)
         )
     }
 
@@ -1456,7 +1585,7 @@ struct ContentView: View {
             .foregroundStyle(color)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Color.white.opacity(0.05))
+            .background(Color.secondary.opacity(0.12))
             .clipShape(Capsule())
     }
 
@@ -1475,7 +1604,7 @@ struct ContentView: View {
                 .foregroundStyle(Color.orange.opacity(0.95))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(Color.white.opacity(0.05))
+                .background(Color.secondary.opacity(0.12))
                 .clipShape(Capsule())
         }
     }
@@ -1485,6 +1614,17 @@ struct ContentView: View {
             return "Page \(pageNumber)"
         }
         return "Item \(index + 1)"
+    }
+
+    private func containsArabic(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x0600...0x06FF, 0xFB50...0xFDFF, 0xFE70...0xFEFF:
+                true
+            default:
+                false
+            }
+        }
     }
 
     private func affectedPageCount(_ report: OCRReviewReport) -> Int {
@@ -1538,22 +1678,21 @@ struct ContentView: View {
     }
 
     private var sidebarPanelFill: some ShapeStyle {
-        LinearGradient(
-            colors: [
-                Color.white.opacity(0.07),
-                Color.white.opacity(0.03),
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
+        Color(nsColor: .controlBackgroundColor)
     }
 }
 
 private struct ReviewPagePreview: View {
     let page: ReviewedPage
+    let highlightBox: OCRBoundingBox?
 
     @State private var previewImage: NSImage?
     @State private var didLoad = false
+
+    init(page: ReviewedPage, highlightBox: OCRBoundingBox? = nil) {
+        self.page = page
+        self.highlightBox = highlightBox
+    }
 
     var body: some View {
         ZoomableReviewSurface(
@@ -1562,10 +1701,19 @@ private struct ReviewPagePreview: View {
             unavailableTitle: "Preview unavailable",
             unavailableMessage: "The page image could not be rendered for this source.",
             viewportSize: nil,
-            showsCompactControls: false
+            showsCompactControls: false,
+            highlightBox: highlightBox
         )
         .task(id: page.id) {
-            previewImage = ReviewPreviewRenderer.pageImage(sourcePath: page.sourcePath, pageNumber: page.pageNumber)
+            previewImage = nil
+            didLoad = false
+            let image = await Task.detached(priority: .userInitiated) {
+                ReviewPreviewRenderer.pageImage(sourcePath: page.sourcePath, pageNumber: page.pageNumber)
+            }.value
+            guard !Task.isCancelled else {
+                return
+            }
+            previewImage = image
             didLoad = true
         }
     }
@@ -1592,7 +1740,15 @@ private struct ReviewLinePreview: View {
                 didLoad = true
                 return
             }
-            previewImage = ReviewPreviewRenderer.image(for: line)
+            previewImage = nil
+            didLoad = false
+            let image = await Task.detached(priority: .userInitiated) {
+                ReviewPreviewRenderer.image(for: line)
+            }.value
+            guard !Task.isCancelled else {
+                return
+            }
+            previewImage = image
             didLoad = true
         }
     }
@@ -1612,30 +1768,6 @@ private struct ReviewLinePreview: View {
     }
 }
 
-private struct CompactReviewLinePreview: View {
-    let line: ReviewedLine
-
-    @State private var previewImage: NSImage?
-    @State private var didLoad = false
-
-    var body: some View {
-        ZoomableReviewSurface(
-            image: previewImage,
-            didLoad: didLoad,
-            unavailableTitle: line.boundingBox == nil ? "No crop" : "Preview unavailable",
-            unavailableMessage: line.boundingBox == nil
-                ? "This line has no crop geometry."
-                : "The crop preview could not be rendered.",
-            viewportSize: CGSize(width: 360, height: 156),
-            showsCompactControls: true
-        )
-        .task(id: line.id) {
-            previewImage = ReviewPreviewRenderer.image(for: line)
-            didLoad = true
-        }
-    }
-}
-
 private struct CheckpointIssuePreview: View {
     let issue: OCRReviewIssue
 
@@ -1652,7 +1784,15 @@ private struct CheckpointIssuePreview: View {
             showsCompactControls: true
         )
         .task(id: issue.id) {
-            previewImage = ReviewPreviewRenderer.image(for: issue)
+            previewImage = nil
+            didLoad = false
+            let image = await Task.detached(priority: .userInitiated) {
+                ReviewPreviewRenderer.image(for: issue)
+            }.value
+            guard !Task.isCancelled else {
+                return
+            }
+            previewImage = image
             didLoad = true
         }
     }
@@ -1665,6 +1805,25 @@ private struct ZoomableReviewSurface: View {
     let unavailableMessage: String
     let viewportSize: CGSize?
     let showsCompactControls: Bool
+    let highlightBox: OCRBoundingBox?
+
+    init(
+        image: NSImage?,
+        didLoad: Bool,
+        unavailableTitle: String,
+        unavailableMessage: String,
+        viewportSize: CGSize?,
+        showsCompactControls: Bool,
+        highlightBox: OCRBoundingBox? = nil
+    ) {
+        self.image = image
+        self.didLoad = didLoad
+        self.unavailableTitle = unavailableTitle
+        self.unavailableMessage = unavailableMessage
+        self.viewportSize = viewportSize
+        self.showsCompactControls = showsCompactControls
+        self.highlightBox = highlightBox
+    }
 
     @State private var zoomScale: CGFloat = 1.0
     @State private var committedOffset: CGSize = .zero
@@ -1687,6 +1846,8 @@ private struct ZoomableReviewSurface: View {
                 .buttonStyle(.bordered)
                 .disabled(image == nil)
                 .controlSize(showsCompactControls ? .small : .regular)
+                .accessibilityLabel("Zoom out")
+                .help("Makes the source preview smaller.")
 
                 Text("\(Int(zoomScale * 100))%")
                     .font(.caption.monospacedDigit())
@@ -1701,6 +1862,8 @@ private struct ZoomableReviewSurface: View {
                 .buttonStyle(.bordered)
                 .disabled(image == nil)
                 .controlSize(showsCompactControls ? .small : .regular)
+                .accessibilityLabel("Zoom in")
+                .help("Makes the source preview larger.")
 
                 Button("Fit") {
                     zoomScale = 1.0
@@ -1730,40 +1893,54 @@ private struct ZoomableReviewSurface: View {
                         )
 
                         ZStack {
-                            Color.clear
-
                             Image(nsImage: image)
                                 .resizable()
                                 .frame(width: baseSize.width, height: baseSize.height)
-                                .scaleEffect(zoomScale, anchor: .center)
-                                .offset(x: totalOffset.width, y: totalOffset.height)
-                                .gesture(
-                                    DragGesture(minimumDistance: 0)
-                                        .onChanged { value in
-                                            guard zoomScale > 1 else { return }
-                                            isDragging = true
-                                            dragOffset = value.translation
-                                        }
-                                        .onEnded { value in
-                                            guard zoomScale > 1 else {
-                                                isDragging = false
-                                                dragOffset = .zero
-                                                return
-                                            }
-                                            committedOffset = clampedOffset(
-                                                proposed: CGSize(
-                                                    width: committedOffset.width + value.translation.width,
-                                                    height: committedOffset.height + value.translation.height
-                                                ),
-                                                imageSize: baseSize,
-                                                viewportSize: viewport,
-                                                zoomScale: zoomScale
-                                            )
-                                            dragOffset = .zero
-                                            isDragging = false
-                                        }
-                                )
+
+                            if let highlightBox {
+                                let highlightRect = highlightBox.rect(in: CGRect(origin: .zero, size: baseSize))
+
+                                Rectangle()
+                                    .fill(Color.accentColor.opacity(0.16))
+                                    .overlay {
+                                        Rectangle()
+                                            .stroke(Color.accentColor, lineWidth: 2 / zoomScale)
+                                    }
+                                    .frame(width: highlightRect.width, height: highlightRect.height)
+                                    .position(x: highlightRect.midX, y: highlightRect.midY)
+                                    .allowsHitTesting(false)
+                                    .accessibilityHidden(true)
+                            }
                         }
+                        .frame(width: baseSize.width, height: baseSize.height)
+                        .scaleEffect(zoomScale, anchor: .center)
+                        .offset(x: totalOffset.width, y: totalOffset.height)
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { value in
+                                    guard zoomScale > 1 else { return }
+                                    isDragging = true
+                                    dragOffset = value.translation
+                                }
+                                .onEnded { value in
+                                    guard zoomScale > 1 else {
+                                        isDragging = false
+                                        dragOffset = .zero
+                                        return
+                                    }
+                                    committedOffset = clampedOffset(
+                                        proposed: CGSize(
+                                            width: committedOffset.width + value.translation.width,
+                                            height: committedOffset.height + value.translation.height
+                                        ),
+                                        imageSize: baseSize,
+                                        viewportSize: viewport,
+                                        zoomScale: zoomScale
+                                    )
+                                    dragOffset = .zero
+                                    isDragging = false
+                                }
+                        )
                         .frame(width: viewport.width, height: viewport.height)
                         .contentShape(Rectangle())
                         .clipped()
@@ -1812,12 +1989,9 @@ private struct ZoomableReviewSurface: View {
                 alignment: .center
             )
             .frame(maxWidth: viewportSize == nil ? .infinity : nil, maxHeight: .infinity)
-            .background(Color.black.opacity(0.22))
+            .background(Color(nsColor: .textBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-            )
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color(nsColor: .separatorColor)))
         }
         .onChange(of: image == nil) { _ in
             zoomScale = 1.0
@@ -1952,11 +2126,11 @@ private struct SelectionPill: View {
     var body: some View {
         ZStack(alignment: isSelected ? .trailing : .leading) {
             Capsule()
-                .fill(isSelected ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.12))
+                .fill(isSelected ? Color.accentColor.opacity(0.9) : Color.secondary.opacity(0.3))
                 .frame(width: 42, height: 24)
 
             Circle()
-                .fill(.white.opacity(isSelected ? 0.95 : 0.75))
+                .fill(isSelected ? Color.white.opacity(0.95) : Color.primary.opacity(0.75))
                 .frame(width: 18, height: 18)
                 .padding(.horizontal, 3)
         }

@@ -24,5 +24,9 @@ let package = Package(
             name: "applevision",
             dependencies: ["AppleVisionCore"]
         ),
+        .testTarget(
+            name: "AppleVisionCoreTests",
+            dependencies: ["AppleVisionCore"]
+        ),
     ]
 )

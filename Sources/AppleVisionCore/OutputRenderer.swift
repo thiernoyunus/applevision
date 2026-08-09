@@ -81,7 +81,7 @@ public enum OutputRenderer {
                 label = result.sourcePath
             }
 
-            let body = result.text.isEmpty ? "[No text recognized]" : result.text
+            let body = result.structuredText.isEmpty ? "[No text recognized]" : result.structuredText
             return "===== \(label) =====\n\(body)"
         }
         .joined(separator: "\n\n") + "\n"
@@ -96,7 +96,7 @@ public enum OutputRenderer {
 
     private static func renderPlainText(results: [OCRResult]) -> String {
         results
-            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .map { $0.structuredText.trimmingCharacters(in: .newlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n") + "\n"
     }

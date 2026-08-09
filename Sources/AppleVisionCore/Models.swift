@@ -104,21 +104,151 @@ public struct OCRResult: Codable, Sendable {
     public let pageNumber: Int?
     public let text: String
     public let lines: [OCRLine]
+    public let structure: OCRDocumentStructure?
 
-    public init(sourcePath: String, pageNumber: Int?, text: String, lines: [OCRLine] = []) {
+    public init(
+        sourcePath: String,
+        pageNumber: Int?,
+        text: String,
+        lines: [OCRLine] = [],
+        structure: OCRDocumentStructure? = nil
+    ) {
         self.sourcePath = sourcePath
         self.pageNumber = pageNumber
         self.text = text
         self.lines = lines
+        self.structure = structure
     }
 
-    public init(sourcePath: String, pageNumber: Int?, lines: [OCRLine]) {
+    public init(
+        sourcePath: String,
+        pageNumber: Int?,
+        lines: [OCRLine],
+        structure: OCRDocumentStructure? = nil
+    ) {
         self.sourcePath = sourcePath
         self.pageNumber = pageNumber
         self.lines = lines
         self.text = lines
             .map(\.text)
             .joined(separator: "\n")
+        self.structure = structure
+    }
+
+    public var structuredText: String {
+        guard let structure, !structure.tables.isEmpty else {
+            return text
+        }
+
+        let tables = structure.tables.enumerated().map { index, table in
+            StructuredTable(index: index, table: table, anchor: table.anchorLineIndex(in: lines))
+        }
+        let tablesByAnchor = Dictionary(grouping: tables, by: \.anchor)
+        let coveredLineIndices = Set(tables.flatMap { $0.table.validLineIndices(in: lines) })
+        var output: [String] = []
+        var emittedTables = Set<Int>()
+
+        for lineIndex in 0 ... lines.count {
+            if let anchoredTables = tablesByAnchor[lineIndex] {
+                for entry in anchoredTables.sorted(by: { $0.index < $1.index }) {
+                    guard emittedTables.insert(entry.index).inserted else {
+                        continue
+                    }
+                    output.append(entry.table.renderedText(using: lines))
+                }
+            }
+
+            guard lineIndex < lines.count, !coveredLineIndices.contains(lineIndex) else {
+                continue
+            }
+            output.append(lines[lineIndex].text)
+        }
+
+        return output.joined(separator: "\n")
+    }
+
+    public var structuredLineIndices: [Int] {
+        guard let structure, !structure.tables.isEmpty else {
+            return Array(lines.indices)
+        }
+
+        let tables = structure.tables.enumerated().map { index, table in
+            StructuredTable(index: index, table: table, anchor: table.anchorLineIndex(in: lines))
+        }
+        let tablesByAnchor = Dictionary(grouping: tables, by: \.anchor)
+        var orderedIndices: [Int] = []
+        var emittedIndices = Set<Int>()
+        var emittedTables = Set<Int>()
+
+        for lineIndex in 0 ... lines.count {
+            if let anchoredTables = tablesByAnchor[lineIndex] {
+                for entry in anchoredTables.sorted(by: { $0.index < $1.index }) {
+                    guard emittedTables.insert(entry.index).inserted else {
+                        continue
+                    }
+                    for index in entry.table.lineIndicesInReadingOrder(in: lines) where emittedIndices.insert(index).inserted {
+                        orderedIndices.append(index)
+                    }
+                }
+            }
+
+            guard lineIndex < lines.count, emittedIndices.insert(lineIndex).inserted else {
+                continue
+            }
+            orderedIndices.append(lineIndex)
+        }
+
+        return orderedIndices
+    }
+
+    public var structuredLines: [OCRLine] {
+        structuredLineIndices.map { lines[$0] }
+    }
+}
+
+public struct OCRDocumentStructure: Codable, Sendable, Equatable {
+    public let tables: [OCRTable]
+
+    public init(tables: [OCRTable]) {
+        self.tables = tables
+    }
+}
+
+public struct OCRTable: Codable, Sendable, Equatable {
+    public let cells: [OCRTableCell]
+    public let boundingBox: OCRBoundingBox?
+
+    public init(cells: [OCRTableCell], boundingBox: OCRBoundingBox? = nil) {
+        self.cells = cells
+        self.boundingBox = boundingBox
+    }
+}
+
+public struct OCRTableCell: Codable, Sendable, Equatable {
+    public let row: Int
+    public let column: Int
+    public let rowSpan: Int
+    public let columnSpan: Int
+    public let fallbackText: String
+    public let boundingBox: OCRBoundingBox?
+    public let lineIndices: [Int]
+
+    public init(
+        row: Int,
+        column: Int,
+        rowSpan: Int = 1,
+        columnSpan: Int = 1,
+        fallbackText: String = "",
+        boundingBox: OCRBoundingBox? = nil,
+        lineIndices: [Int] = []
+    ) {
+        self.row = row
+        self.column = column
+        self.rowSpan = max(rowSpan, 1)
+        self.columnSpan = max(columnSpan, 1)
+        self.fallbackText = fallbackText
+        self.boundingBox = boundingBox
+        self.lineIndices = Array(Set(lineIndices)).sorted()
     }
 }
 
@@ -166,7 +296,7 @@ public struct OCRCandidate: Codable, Sendable {
     }
 }
 
-public struct OCRBoundingBox: Codable, Sendable {
+public struct OCRBoundingBox: Codable, Sendable, Equatable {
     public let minX: Double
     public let minY: Double
     public let width: Double
@@ -177,6 +307,57 @@ public struct OCRBoundingBox: Codable, Sendable {
         self.minY = minY
         self.width = width
         self.height = height
+    }
+
+    /// Maps Vision's normalized, lower-left-origin box into a top-left-origin rectangle.
+    public func rect(in topLeftBounds: CGRect) -> CGRect {
+        CGRect(
+            x: topLeftBounds.minX + CGFloat(minX) * topLeftBounds.width,
+            y: topLeftBounds.minY + (1 - CGFloat(minY) - CGFloat(height)) * topLeftBounds.height,
+            width: CGFloat(width) * topLeftBounds.width,
+            height: CGFloat(height) * topLeftBounds.height
+        )
+    }
+}
+
+private struct StructuredTable {
+    let index: Int
+    let table: OCRTable
+    let anchor: Int
+}
+
+private extension OCRTable {
+    func validLineIndices(in lines: [OCRLine]) -> [Int] {
+        Array(Set(cells.flatMap(\.lineIndices).filter { lines.indices.contains($0) })).sorted()
+    }
+
+    func anchorLineIndex(in lines: [OCRLine]) -> Int {
+        validLineIndices(in: lines).first ?? 0
+    }
+
+    func lineIndicesInReadingOrder(in lines: [OCRLine]) -> [Int] {
+        var seen = Set<Int>()
+        return cells
+            .sorted { ($0.row, $0.column) < ($1.row, $1.column) }
+            .flatMap(\.lineIndices)
+            .filter { lines.indices.contains($0) && seen.insert($0).inserted }
+    }
+
+    func renderedText(using lines: [OCRLine]) -> String {
+        guard let rowCount = cells.map({ $0.row + $0.rowSpan }).max(),
+              let columnCount = cells.map({ $0.column + $0.columnSpan }).max()
+        else {
+            return ""
+        }
+
+        var rows = Array(repeating: Array(repeating: "", count: columnCount), count: rowCount)
+        for cell in cells.sorted(by: { ($0.row, $0.column) < ($1.row, $1.column) }) where rows.indices.contains(cell.row) && rows[cell.row].indices.contains(cell.column) {
+            let mappedIndices = cell.lineIndices.filter { lines.indices.contains($0) }
+            rows[cell.row][cell.column] = mappedIndices.isEmpty
+                ? cell.fallbackText
+                : mappedIndices.map { lines[$0].text }.joined(separator: " ")
+        }
+        return rows.map { $0.joined(separator: "\t") }.joined(separator: "\n")
     }
 }
 
