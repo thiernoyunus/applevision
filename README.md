@@ -1,4 +1,15 @@
-# applevision
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/header/graph.svg?title=applevision&subtitle=Batch+OCR+for+images+and+PDFs+on+macOS&logo=apple&mode=dark" />
+    <img alt="applevision" src="https://shieldcn.dev/header/graph.svg?title=applevision&subtitle=Batch+OCR+for+images+and+PDFs+on+macOS&logo=apple&mode=light" />
+  </picture>
+</p>
+
+<p align="center">
+  <a href="https://github.com/thiernoyunus/applevision"><img alt="Swift + Apple Vision" src="https://shieldcn.dev/badge/Swift-macOS-F05138.svg?logo=swift&variant=secondary" /></a>
+  <a href="https://github.com/thiernoyunus/applevision/commits"><img alt="Last commit" src="https://shieldcn.dev/github/last-commit/thiernoyunus/applevision.svg?variant=secondary" /></a>
+  <a href="https://github.com/thiernoyunus/applevision"><img alt="Stars" src="https://shieldcn.dev/github/stars/thiernoyunus/applevision.svg?variant=secondary" /></a>
+</p>
 
 `applevision` is a macOS command-line tool that batch-processes images and PDFs using Apple's built-in frameworks.
 
